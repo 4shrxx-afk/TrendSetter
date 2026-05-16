@@ -10,10 +10,10 @@ import re
 # ║                    CONFIGURATION                         ║
 # ╚══════════════════════════════════════════════════════════╝
 
-BOT_TOKEN       = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN       = "MTUwNTEyMjM1Mjg4MTYwMjcwMQ.GmP2x4.GJJcOUncQz8fWEFNGLypK9vtJTl1Ab1pHyK_L0"
 LOG_CHANNEL     = "mod-logs"
 WELCOME_CHANNEL = "welcome"
-OWNER_IDS       = []   # add your Discord user ID e.g. [123456789]
+OWNER_IDS       = [1341036065397411926]   # add your Discord user ID e.g. [123456789]
 
 # ── Brand colours ────────────────────────────────────────────
 C_RED    = 0xED4245
