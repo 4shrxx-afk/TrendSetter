@@ -1,221 +1,362 @@
 """
-╔══════════════════════════════════════════════════════════╗
-║            TSR ADVANCED DISCORD BOT                      ║
-║  Features: Hardban · Verify · SetupLock · Tickets       ║
-║            AutoMod · Snipe · TempBan · Logging           ║
-╚══════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════════════════╗
+║            TSR ADVANCED DISCORD BOT  ·  v3.0                            ║
+║  Moderation · ModMail · Tickets · AutoMod · Anti-Nuke · Giveaways       ║
+║  Verification · Comprehensive Logging · AFK · Levels · Reminders        ║
+╚══════════════════════════════════════════════════════════════════════════╝
 
-Railway Hosting: Set BOT_TOKEN as a Railway environment variable.
-All guild configs are saved to data/ folder (JSON).
+Railway: Set BOT_TOKEN as a Railway environment variable.
+All guild data is stored in the data/ folder (JSON files).
 """
 
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import datetime
-import asyncio
-import random
-import re
-import os
-import json
-import string
+import datetime, asyncio, random, re, os, json, string, aiohttp, io
 from typing import Optional
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                    CONFIGURATION                         ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════════════════════════════════════════════════════════════
+#  CONFIG
+# ═══════════════════════════════════════════════════════════════════════════
 
-# ── Token from Railway environment variable ──────────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set!")
 
-# ── Owner IDs (add your Discord user ID) ────────────────────
 OWNER_IDS_RAW = os.environ.get("OWNER_IDS", "")
 OWNER_IDS = [int(x.strip()) for x in OWNER_IDS_RAW.split(",") if x.strip().isdigit()]
 
-# ── Brand colours ─────────────────────────────────────────────
-C_RED    = 0xED4245
-C_ORANGE = 0xFEA832
-C_YELLOW = 0xFEE75C
-C_GREEN  = 0x57F287
-C_BLUE   = 0x5865F2
-C_PURPLE = 0x9B59B6
-C_PINK   = 0xFF73FA
-C_TEAL   = 0x1ABC9C
+# ── Colours ─────────────────────────────────────────────────────────────────
+C_RED     = 0xED4245
+C_ORANGE  = 0xFEA832
+C_YELLOW  = 0xFEE75C
+C_GREEN   = 0x2ECC71
+C_BLUE    = 0x3498DB
+C_PURPLE  = 0x9B59B6
+C_PINK    = 0xFF73FA
+C_TEAL    = 0x1ABC9C
+C_BLURPLE = 0x5865F2
+C_DARK    = 0x2F3136
+C_GOLD    = 0xF1C40F
+C_NAVY    = 0x2C3E50
 
-# ── Emoji map ─────────────────────────────────────────────────
-E = {
-    "ban":"🔨","unban":"🔓","kick":"👢","timeout":"⏱️","warn":"⚠️",
-    "purge":"🗑️","lock":"🔒","unlock":"🔓","slow":"🐢","nick":"✏️",
-    "role":"🎭","success":"✅","error":"❌","shield":"🛡️","star":"⭐",
-    "wave":"👋","crown":"👑","chart":"📊","clock":"🕐","ping":"🏓",
-    "bot":"🤖","server":"🏠","user":"👤","log":"📝","fire":"🔥",
-    "diamond":"💎","link":"🔗","mail":"📨","ticket":"🎫","verify":"✔️",
-    "hardban":"💀","softban":"🧹","tempban":"⏳","snipe":"👻",
-    "automod":"⚡","filter":"🚫","voice":"🔊","edit":"📝",
+# ── Command permission groups ─────────────────────────────────────────────
+# Admins manage these groups; members/verified get roles assigned to groups
+CMD_GROUPS = {
+    "moderation": ["ban","unban","kick","timeout","untimeout","warn","warnings",
+                   "clearwarnings","delwarn","purge","slowmode","nick","role",
+                   "softban","tempban","hardban","hardban_id","unhardban","hardbans",
+                   "vcmute","vcunmute","deafen","undeafen","move","massrole",
+                   "banlist","lock","unlock","lockdown","endlockdown","closeticket",
+                   "mmclose","mmreply"],
+    "utility":    ["userinfo","serverinfo","roleinfo","channelinfo","avatar","banner",
+                   "ping","stats","snipe","editsnipe","say","embed","announce","poll","multipoll"],
+    "community":  ["suggest","rank","leaderboard","afk","remind","8ball","coinflip",
+                   "roll","choose","giveaway","greroll","gend","verify","getcode"],
+    "setup":      ["setuplog","setupwelcome","setupgoodbye","setuplock","setupverify",
+                   "setuptickets","setupautomod","setupmodmail","setuplevels",
+                   "setupsuggestions","setuproblox","setupantinuke","badword",
+                   "filterlist","setpermission","viewpermissions","help"],
 }
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                    DATA PERSISTENCE                       ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════════════════════════════════════════════════════════════
+#  DATA PERSISTENCE
+# ═══════════════════════════════════════════════════════════════════════════
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-def data_path(filename: str) -> str:
-    return os.path.join(DATA_DIR, filename)
-
-def load_json(filename: str, default=None):
-    path = data_path(filename)
-    if os.path.exists(path):
+def _path(f): return os.path.join(DATA_DIR, f)
+def load_json(f, default=None):
+    p = _path(f)
+    if os.path.exists(p):
         try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
+            with open(p) as fp: return json.load(fp)
+        except Exception: pass
     return default if default is not None else {}
+def save_json(f, data):
+    with open(_path(f), "w") as fp: json.dump(data, fp, indent=2)
 
-def save_json(filename: str, data):
-    with open(data_path(filename), "w") as f:
-        json.dump(data, f, indent=2)
+warnings_db   = load_json("warnings.json")
+guild_config  = load_json("guild_config.json")
+hardban_db    = load_json("hardbans.json")
+tempban_db    = load_json("tempbans.json")
+giveaway_db   = load_json("giveaways.json")
+levels_db     = load_json("levels.json")
+afk_db        = load_json("afk.json")
+reminders_db  = load_json("reminders.json", default=[])
+suggestions_db= load_json("suggestions.json")
+roblox_db     = load_json("roblox.json")
+modmail_db    = load_json("modmail.json")
+cmd_perms_db  = load_json("cmd_perms.json")   # {gid: {cmd_group: [role_ids]}}
+antinuke_db   = load_json("antinuke.json")    # {gid: {uid: {action: [timestamps]}}}
 
-# In-memory databases (loaded from JSON on startup)
-warnings_db:   dict = load_json("warnings.json")
-guild_config:  dict = load_json("guild_config.json")
-hardban_db:    dict = load_json("hardbans.json")
-tempban_db:    dict = load_json("tempbans.json")
-snipe_db:      dict = {}   # ephemeral only
-editsnipe_db:  dict = {}   # ephemeral only
-antispam_db:   dict = {}   # ephemeral only
-
+snipe_db:      dict = {}
+editsnipe_db:  dict = {}
+antispam_db:   dict = {}
 ANTISPAM_LIMIT  = 5
 ANTISPAM_WINDOW = 5
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                    GUILD CONFIG HELPERS                   ║
-# ╚══════════════════════════════════════════════════════════╝
+# Anti-nuke tracking (in-memory, reset each run is fine)
+nuke_tracker: dict = {}   # {gid: {uid: {action: [ts, ts, ...]}}}
+
+# Pending verification codes / math CAPTCHAs
+pending_codes:  dict = {}   # uid -> code
+pending_math:   dict = {}   # uid -> answer
+
+XP_PER_MSG   = 15
+XP_COOLDOWN  = 60
+_xp_cooldown: dict = {}
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  GUILD CONFIG
+# ═══════════════════════════════════════════════════════════════════════════
+
+_DEFAULTS = {
+    "log_channel": None, "welcome_channel": None,
+    "welcome_message": "Welcome {user} to **{server}**! You are member #{count}.",
+    "goodbye_channel": None,
+    "goodbye_message": "**{user}** has left the server. Goodbye!",
+    "verify_channel": None, "verify_role": None, "verify_method": "button",
+    "verify_message": "Click **Verify Me** to gain access to the server.",
+    "verify_min_age_days": 0,        # account must be X days old
+    "verify_require_phone": False,   # require phone-verified Discord account
+    "lock_exempt_roles": [], "lock_deny_perm": "send_messages",
+    "automod_links": False, "automod_caps": False,
+    "automod_caps_pct": 80, "automod_caps_min": 10, "automod_badwords": [],
+    "automod_exempt_roles": [],
+    "ticket_channel": None, "ticket_category": None,
+    "ticket_support_role": None, "ticket_transcript_channel": None,
+    "ticket_message": "Click the button below to open a support ticket.",
+    "ticket_count": 0,
+    "modmail_channel": None, "modmail_category": None, "modmail_log_channel": None,
+    "suggestion_channel": None,
+    "level_channel": None,
+    "level_up_msg": "{user} levelled up to **Level {level}**! 🎉",
+    "roblox_channel": None, "roblox_last_version": None,
+    # Anti-nuke
+    "antinuke_enabled": False,
+    "antinuke_threshold_bans": 3,       # X bans in Y seconds = nuke
+    "antinuke_threshold_kicks": 5,
+    "antinuke_threshold_channels": 3,
+    "antinuke_threshold_roles": 3,
+    "antinuke_threshold_webhooks": 3,
+    "antinuke_window": 10,              # seconds
+    "antinuke_action": "strip",         # strip | ban | kick
+    "antinuke_whitelist": [],           # role IDs immune to anti-nuke
+}
 
 def gcfg(guild_id: int) -> dict:
-    """Get guild config dict, creating default if missing."""
     gid = str(guild_id)
-    if gid not in guild_config:
-        guild_config[gid] = {
-            "log_channel":         None,
-            "welcome_channel":     None,
-            "welcome_message":     "Welcome {user} to **{server}**! You are member #{count}.",
-            "goodbye_channel":     None,
-            "goodbye_message":     "**{user}** has left the server. Goodbye!",
-            "verify_channel":      None,
-            "verify_role":         None,
-            "verify_method":       "button",   # button | reaction | code
-            "verify_message":      "Click the button below to verify and gain access to the server!",
-            "lock_exempt_roles":   [],          # role IDs exempt from lock
-            "lock_deny_perm":      "send_messages",  # permission to deny on lock
-            "automod_links":       False,
-            "automod_caps":        False,
-            "automod_caps_pct":    80,
-            "automod_caps_min":    10,
-            "automod_badwords":    [],
-            "automod_exempt_roles":[],
-            "ticket_channel":      None,
-            "ticket_category":     None,
-            "ticket_support_role": None,
-            "ticket_message":      "Click the button below to open a support ticket.",
-            "ticket_count":        0,
-        }
-        save_json("guild_config.json", guild_config)
+    guild_config.setdefault(gid, {})
+    for k, v in _DEFAULTS.items():
+        guild_config[gid].setdefault(k, v)
     return guild_config[gid]
 
-def save_cfg():
-    save_json("guild_config.json", guild_config)
+def save_cfg(): save_json("guild_config.json", guild_config)
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                      BOT SETUP                           ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════════════════════════════════════════════════════════════
+#  BOT SETUP
+# ═══════════════════════════════════════════════════════════════════════════
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                   EMBED BUILDERS                         ║
-# ╚══════════════════════════════════════════════════════════╝
+def now_utc(): return datetime.datetime.now(datetime.UTC)
 
-def embed_success(title: str, description: str = None) -> discord.Embed:
-    e = discord.Embed(title=f"{E['success']} {title}", description=description, color=C_GREEN)
-    e.timestamp = datetime.datetime.utcnow()
+# ═══════════════════════════════════════════════════════════════════════════
+#  COMMAND PERMISSION SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _get_cmd_group(cmd_name: str) -> Optional[str]:
+    for group, cmds in CMD_GROUPS.items():
+        if cmd_name in cmds:
+            return group
+    return None
+
+def has_cmd_perm(interaction: discord.Interaction, cmd_name: str) -> bool:
+    """
+    Returns True if the user is allowed to run this command.
+    Rules:
+      1. Bot owner or server admin → always allowed
+      2. If the command's group has role assignments → user must have one of those roles
+      3. Commands in 'moderation' or 'setup' group → require Discord's native permissions
+         (these are already enforced by @app_commands.default_permissions, this is a safety check)
+    """
+    if interaction.user.id in OWNER_IDS:
+        return True
+    if interaction.user.guild_permissions.administrator:
+        return True
+
+    gid   = str(interaction.guild.id)
+    group = _get_cmd_group(cmd_name)
+    perms = cmd_perms_db.get(gid, {})
+
+    if group and group in perms:
+        allowed_role_ids = perms[group]
+        user_role_ids    = [str(r.id) for r in interaction.user.roles]
+        if any(rid in allowed_role_ids for rid in user_role_ids):
+            return True
+        # Also check individual command overrides
+        if cmd_name in perms:
+            if any(rid in perms[cmd_name] for rid in user_role_ids):
+                return True
+        return False
+
+    # Default: rely on Discord's built-in permission checks (already on the command)
+    return True
+
+def perm_denied() -> discord.Embed:
+    return _e_error("Permission Denied",
+                    "You don't have permission to use this command.\n"
+                    "Ask an admin to use `/setpermission` to grant access.")
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  EMBED BUILDERS  (redesigned for v3)
+# ═══════════════════════════════════════════════════════════════════════════
+
+_BOT_ICON = None   # set in on_ready
+
+def _stamp(e: discord.Embed) -> discord.Embed:
+    e.timestamp = now_utc()
     return e
 
-def embed_error(title: str, description: str = None) -> discord.Embed:
-    e = discord.Embed(title=f"{E['error']} {title}", description=description, color=C_RED)
-    e.timestamp = datetime.datetime.utcnow()
+def _footer(e: discord.Embed, text: str = "TSR Bot") -> discord.Embed:
+    e.set_footer(text=text)
+    return _stamp(e)
+
+def _e_success(title: str, desc: str = None, *, color: int = C_GREEN) -> discord.Embed:
+    e = discord.Embed(title=f"✅  {title}", description=desc, color=color)
+    return _footer(e)
+
+def _e_error(title: str, desc: str = None) -> discord.Embed:
+    e = discord.Embed(title=f"❌  {title}", description=desc, color=C_RED)
+    return _footer(e)
+
+def _e_info(title: str, desc: str = None, color: int = C_BLUE) -> discord.Embed:
+    e = discord.Embed(title=title, description=desc, color=color)
+    return _footer(e)
+
+def _e_warn(title: str, desc: str = None) -> discord.Embed:
+    e = discord.Embed(title=f"⚠️  {title}", description=desc, color=C_YELLOW)
+    return _footer(e)
+
+def _log_embed(
+    action: str,
+    color: int,
+    *,
+    icon: str = "📋",
+    description: str = None,
+    fields: list[tuple] = None,
+    thumbnail: str = None,
+    author_name: str = None,
+    author_icon: str = None,
+) -> discord.Embed:
+    """Unified log embed — clean, consistent, readable."""
+    e = discord.Embed(color=color, description=description)
+    e.set_author(
+        name=f"  {icon}  {action}",
+        icon_url=author_icon
+    )
+    if thumbnail:
+        e.set_thumbnail(url=thumbnail)
+    if fields:
+        for name, value, inline in fields:
+            e.add_field(name=name, value=value, inline=inline)
+    e.timestamp = now_utc()
+    e.set_footer(text="TSR Log System")
     return e
 
-def embed_info(title: str, description: str = None, color=C_BLUE) -> discord.Embed:
-    e = discord.Embed(title=title, description=description, color=color)
-    e.timestamp = datetime.datetime.utcnow()
-    return e
+def _mod_embed(
+    action: str,
+    icon: str,
+    color: int,
+    moderator: discord.Member,
+    target,
+    reason: str,
+    extra: dict = None,
+) -> discord.Embed:
+    """Rich moderation log embed."""
+    reason = reason or "No reason provided"
+    e = discord.Embed(color=color)
+    e.set_author(
+        name=f"  {icon}  {action}",
+        icon_url=moderator.guild.icon.url if moderator.guild.icon else None
+    )
+    if hasattr(target, "display_avatar"):
+        e.set_thumbnail(url=target.display_avatar.url)
 
-def embed_mod(action: str, emoji: str, moderator, target, reason: str, color: int, extra: dict = None) -> discord.Embed:
-    e = discord.Embed(title=f"{emoji} {action}", color=color, timestamp=datetime.datetime.utcnow())
-    e.set_author(name=f"Moderation • {moderator.guild.name}",
-                 icon_url=moderator.guild.icon.url if moderator.guild.icon else None)
-    e.set_thumbnail(url=target.display_avatar.url if hasattr(target, 'display_avatar') else None)
-    e.add_field(name="👤 Target",    value=f"{target.mention if hasattr(target, 'mention') else target}\n`{target} • {target.id}`", inline=True)
-    e.add_field(name="🛡️ Moderator", value=f"{moderator.mention}\n`{moderator}`", inline=True)
-    e.add_field(name="📝 Reason",    value=f"```{reason or 'No reason provided'}```", inline=False)
+    e.description = (
+        f"```yaml\n"
+        f"Action   : {action}\n"
+        f"Target   : {target} ({getattr(target,'id',target)})\n"
+        f"Moderator: {moderator} ({moderator.id})\n"
+        f"Reason   : {reason}\n"
+        f"```"
+    )
+    e.add_field(
+        name="👤  Target",
+        value=f"{target.mention if hasattr(target,'mention') else target}\n`{target.id if hasattr(target,'id') else target}`",
+        inline=True
+    )
+    e.add_field(
+        name="🛡️  Moderator",
+        value=f"{moderator.mention}\n`{moderator.id}`",
+        inline=True
+    )
     if extra:
         for k, v in extra.items():
             e.add_field(name=k, value=v, inline=True)
+    e.add_field(name="📝  Reason", value=f"```{reason}```", inline=False)
+    e.timestamp = now_utc()
     e.set_footer(text="TSR Moderation System")
     return e
 
-async def send_log(guild: discord.Guild, embed: discord.Embed):
-    cfg = gcfg(guild.id)
-    ch_id = cfg.get("log_channel")
-    ch = guild.get_channel(int(ch_id)) if ch_id else None
-    if ch:
-        await ch.send(embed=embed)
+# ═══════════════════════════════════════════════════════════════════════════
+#  LOG CHANNEL HELPER
+# ═══════════════════════════════════════════════════════════════════════════
 
-async def dm_member(member: discord.Member, embed: discord.Embed):
+async def send_log(guild: discord.Guild, embed: discord.Embed, content: str = None):
+    cfg   = gcfg(guild.id)
+    ch_id = cfg.get("log_channel")
+    if not ch_id:
+        return
+    ch = guild.get_channel(int(ch_id))
+    if ch:
+        try:
+            await ch.send(content=content, embed=embed)
+        except Exception:
+            pass
+
+async def dm_user(user, embed: discord.Embed):
     try:
-        await member.send(embed=embed)
+        await user.send(embed=embed)
     except Exception:
         pass
 
-def no_perm(action: str) -> discord.Embed:
-    return embed_error("Missing Permissions", f"You need **{action}** permission.")
+# ═══════════════════════════════════════════════════════════════════════════
+#  HELPERS
+# ═══════════════════════════════════════════════════════════════════════════
 
-def role_too_high() -> discord.Embed:
-    return embed_error("Role Hierarchy", "You cannot moderate someone with an equal or higher role.")
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║                       HELPERS                            ║
-# ╚══════════════════════════════════════════════════════════╝
-
-def warn_user(guild_id: str, user_id: str, reason: str, mod_name: str) -> int:
-    warnings_db.setdefault(guild_id, {}).setdefault(user_id, [])
-    warnings_db[guild_id][user_id].append({
-        "reason":    reason,
-        "moderator": mod_name,
-        "time":      datetime.datetime.utcnow().strftime("%b %d, %Y %H:%M UTC")
+def warn_user(gid, uid, reason, mod_name):
+    warnings_db.setdefault(gid, {}).setdefault(uid, [])
+    warnings_db[gid][uid].append({
+        "reason": reason, "moderator": mod_name,
+        "time":   now_utc().strftime("%b %d %Y %H:%M UTC")
     })
     save_json("warnings.json", warnings_db)
-    return len(warnings_db[guild_id][user_id])
+    return len(warnings_db[gid][uid])
 
-def parse_duration(s: str) -> Optional[datetime.timedelta]:
+def parse_dur(s: str) -> Optional[datetime.timedelta]:
     m = re.match(r"^(\d+)([smhd])$", s.lower())
-    if not m:
-        return None
+    if not m: return None
     v, u = int(m.group(1)), m.group(2)
     return {"s": datetime.timedelta(seconds=v), "m": datetime.timedelta(minutes=v),
-            "h": datetime.timedelta(hours=v),   "d": datetime.timedelta(days=v)}.get(u)
+            "h": datetime.timedelta(hours=v),   "d": datetime.timedelta(days=v)}[u]
 
-def duration_str(td: datetime.timedelta) -> str:
-    total = int(td.total_seconds())
-    d, r  = divmod(total, 86400)
-    h, r  = divmod(r, 3600)
-    m, s  = divmod(r, 60)
+def dur_str(td: datetime.timedelta) -> str:
+    t = int(td.total_seconds())
+    d, r = divmod(t, 86400); h, r = divmod(r, 3600); m, s = divmod(r, 60)
     parts = []
     if d: parts.append(f"{d}d")
     if h: parts.append(f"{h}h")
@@ -223,39 +364,176 @@ def duration_str(td: datetime.timedelta) -> str:
     if s: parts.append(f"{s}s")
     return " ".join(parts) or "0s"
 
-def is_automod_exempt(member: discord.Member) -> bool:
-    cfg = gcfg(member.guild.id)
-    exempt = cfg.get("automod_exempt_roles", [])
-    if member.guild_permissions.manage_messages:
-        return True
-    return any(str(r.id) in exempt for r in member.roles)
+def xp_for_level(lvl): return 100 * (lvl ** 2)
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                        EVENTS                            ║
-# ╚══════════════════════════════════════════════════════════╝
+def add_xp(gid, uid):
+    key = f"{gid}:{uid}"; now = now_utc().timestamp()
+    if now - _xp_cooldown.get(key, 0) < XP_COOLDOWN:
+        data = levels_db.get(gid, {}).get(uid, {"xp": 0, "level": 0})
+        return data["xp"], data["level"], False
+    _xp_cooldown[key] = now
+    levels_db.setdefault(gid, {}).setdefault(uid, {"xp": 0, "level": 0})
+    entry = levels_db[gid][uid]; entry["xp"] += XP_PER_MSG
+    up = False
+    while entry["xp"] >= xp_for_level(entry["level"] + 1):
+        entry["level"] += 1; up = True
+    save_json("levels.json", levels_db)
+    return entry["xp"], entry["level"], up
+
+def is_automod_exempt(member: discord.Member) -> bool:
+    cfg   = gcfg(member.guild.id)
+    roles = [str(r.id) for r in member.roles]
+    return (member.guild_permissions.manage_messages or
+            any(r in roles for r in cfg.get("automod_exempt_roles", [])))
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ANTI-NUKE ENGINE
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def antinuke_check(guild: discord.Guild, user_id: int, action: str) -> bool:
+    """
+    Returns True if this action triggered the anti-nuke.
+    action: 'ban' | 'kick' | 'channel_delete' | 'role_delete' | 'webhook_create'
+    """
+    cfg = gcfg(guild.id)
+    if not cfg.get("antinuke_enabled"):
+        return False
+    # Whitelist check
+    member = guild.get_member(user_id)
+    if member:
+        wl = cfg.get("antinuke_whitelist", [])
+        if any(str(r.id) in wl for r in member.roles):
+            return False
+        if member.guild_permissions.administrator and user_id not in OWNER_IDS:
+            pass  # admins can still trigger anti-nuke if they abuse it
+
+    thresholds = {
+        "ban":            cfg.get("antinuke_threshold_bans", 3),
+        "kick":           cfg.get("antinuke_threshold_kicks", 5),
+        "channel_delete": cfg.get("antinuke_threshold_channels", 3),
+        "role_delete":    cfg.get("antinuke_threshold_roles", 3),
+        "webhook_create": cfg.get("antinuke_threshold_webhooks", 3),
+    }
+    window = cfg.get("antinuke_window", 10)
+    gid    = str(guild.id)
+    uid    = str(user_id)
+    now    = now_utc().timestamp()
+
+    nuke_tracker.setdefault(gid, {}).setdefault(uid, {}).setdefault(action, [])
+    # Prune old entries
+    nuke_tracker[gid][uid][action] = [t for t in nuke_tracker[gid][uid][action] if now - t < window]
+    nuke_tracker[gid][uid][action].append(now)
+
+    count = len(nuke_tracker[gid][uid][action])
+    limit = thresholds.get(action, 3)
+
+    if count >= limit:
+        nuke_tracker[gid][uid][action] = []  # reset to avoid repeated triggers
+        await _trigger_antinuke(guild, user_id, action, count)
+        return True
+    return False
+
+async def _trigger_antinuke(guild: discord.Guild, user_id: int, action: str, count: int):
+    cfg    = gcfg(guild.id)
+    nk_act = cfg.get("antinuke_action", "strip")
+    member = guild.get_member(user_id)
+
+    log_e = discord.Embed(
+        title="🚨  ANTI-NUKE TRIGGERED",
+        color=C_RED,
+        description=(
+            f"```diff\n"
+            f"- NUKE ACTION DETECTED\n"
+            f"  Action   : {action.upper().replace('_',' ')}\n"
+            f"  Count    : {count} in {cfg.get('antinuke_window',10)}s\n"
+            f"  User     : {user_id}\n"
+            f"  Response : {nk_act.upper()}\n"
+            f"```"
+        )
+    )
+    log_e.add_field(name="⚡  Action Detected", value=action.replace("_", " ").title(), inline=True)
+    log_e.add_field(name="🔢  Count",           value=str(count),                       inline=True)
+    log_e.add_field(name="👤  Perpetrator",     value=f"<@{user_id}> (`{user_id}`)",   inline=True)
+    log_e.add_field(name="🛡️  Response",        value=nk_act.title(),                  inline=True)
+    log_e.timestamp = now_utc()
+    log_e.set_footer(text="TSR Anti-Nuke System")
+    await send_log(guild, log_e)
+
+    # DM owner
+    if guild.owner:
+        dm_e = discord.Embed(
+            title="🚨  Anti-Nuke Alert — Action Required",
+            description=(
+                f"**A nuke attempt was detected in {guild.name}!**\n\n"
+                f"**User:** <@{user_id}> (`{user_id}`)\n"
+                f"**Action:** {action.replace('_',' ').title()}\n"
+                f"**Count:** {count}\n"
+                f"**Bot Response:** {nk_act.title()}"
+            ),
+            color=C_RED
+        )
+        dm_e.timestamp = now_utc()
+        await dm_user(guild.owner, dm_e)
+
+    if not member:
+        return
+
+    if nk_act == "strip":
+        # Remove all roles except @everyone and managed roles
+        removable = [r for r in member.roles if not r.is_default() and not r.managed and r < guild.me.top_role]
+        try:
+            await member.remove_roles(*removable, reason="Anti-Nuke: Role strip")
+        except Exception:
+            pass
+    elif nk_act == "kick":
+        try:
+            await member.kick(reason="Anti-Nuke: Auto-kick")
+        except Exception:
+            pass
+    elif nk_act == "ban":
+        try:
+            await member.ban(reason="Anti-Nuke: Auto-ban", delete_message_days=0)
+        except Exception:
+            pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  EVENTS
+# ═══════════════════════════════════════════════════════════════════════════
 
 @bot.event
 async def on_ready():
+    global _BOT_ICON
+    _BOT_ICON = str(bot.user.display_avatar.url)
     await bot.tree.sync()
-    print(f"\n{'═'*50}\n  {E['bot']} Online: {bot.user}\n  Servers: {len(bot.guilds)}\n{'═'*50}\n")
-    status_rotation.start()
+    bot.add_view(VerifyButton())
+    bot.add_view(TicketButton())
+    bot.add_view(TicketCloseView())
+    bot.add_view(GiveawayView())
+    bot.add_view(SuggestionVoteView())
+    status_loop.start()
     check_tempbans.start()
+    check_reminders.start()
+    check_roblox.start()
+    print(f"\n{'═'*55}")
+    print(f"  🤖  Online: {bot.user} (v3.0)")
+    print(f"  Servers: {len(bot.guilds)}")
+    print(f"{'═'*55}\n")
 
 @tasks.loop(seconds=30)
-async def status_rotation():
-    statuses = [
-        discord.Activity(type=discord.ActivityType.watching,  name=f"{sum(g.member_count for g in bot.guilds):,} members"),
-        discord.Activity(type=discord.ActivityType.watching,  name=f"{len(bot.guilds)} servers"),
+async def status_loop():
+    choices = [
+        discord.Activity(type=discord.ActivityType.watching,
+                         name=f"{sum(g.member_count for g in bot.guilds):,} members"),
         discord.Activity(type=discord.ActivityType.playing,   name="Use /help"),
-        discord.Activity(type=discord.ActivityType.listening, name="slash commands"),
-        discord.Activity(type=discord.ActivityType.watching,  name="over the server"),
+        discord.Activity(type=discord.ActivityType.watching,  name="over the server 👀"),
+        discord.Activity(type=discord.ActivityType.listening, name="your slash commands"),
     ]
-    await bot.change_presence(activity=random.choice(statuses))
+    await bot.change_presence(activity=random.choice(choices), status=discord.Status.online)
 
 @tasks.loop(seconds=60)
 async def check_tempbans():
-    now = datetime.datetime.utcnow().timestamp()
-    to_remove = []
+    now = now_utc().timestamp()
+    removes = []
     for gid, bans in tempban_db.items():
         for uid, data in list(bans.items()):
             if now >= data["expires"]:
@@ -263,1500 +541,2314 @@ async def check_tempbans():
                 if guild:
                     try:
                         user = await bot.fetch_user(int(uid))
-                        await guild.unban(user, reason="Temporary ban expired")
-                        log_e = embed_info(f"{E['unban']} TempBan Expired",
-                                           f"**{user}** (`{user.id}`) has been automatically unbanned.", color=C_GREEN)
-                        await send_log(guild, log_e)
-                    except Exception:
-                        pass
-                to_remove.append((gid, uid))
-    for gid, uid in to_remove:
+                        await guild.unban(user, reason="Temp-ban expired")
+                        await send_log(guild, _log_embed(
+                            "TempBan Expired", C_GREEN, icon="⏳",
+                            fields=[("👤  User", f"{user} (`{user.id}`)", True),
+                                    ("📋  Was banned by", data.get("moderator","?"), True)]))
+                    except Exception: pass
+                removes.append((gid, uid))
+    for gid, uid in removes:
         tempban_db.get(gid, {}).pop(uid, None)
-    if to_remove:
-        save_json("tempbans.json", tempban_db)
+    if removes: save_json("tempbans.json", tempban_db)
+
+@tasks.loop(seconds=30)
+async def check_reminders():
+    now = now_utc().timestamp()
+    remaining = []
+    changed   = False
+    for r in reminders_db:
+        if now >= r["remind_at"]:
+            try:
+                user = await bot.fetch_user(r["user_id"])
+                e = discord.Embed(
+                    title="⏰  Reminder!",
+                    description=r["message"],
+                    color=C_YELLOW
+                )
+                e.set_footer(text=f"You asked to be reminded {r['set_ago']} ago")
+                await user.send(embed=e)
+            except Exception: pass
+            changed = True
+        else:
+            remaining.append(r)
+    if changed:
+        reminders_db.clear(); reminders_db.extend(remaining)
+        save_json("reminders.json", reminders_db)
+
+@tasks.loop(minutes=5)
+async def check_roblox():
+    url = "https://clientsettingscdn.roblox.com/v2/client-version/WindowsPlayer"
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200: return
+                data    = await r.json()
+                version = data.get("clientVersionUpload") or data.get("version")
+    except Exception: return
+    for gid, cfg in guild_config.items():
+        ch_id   = cfg.get("roblox_channel")
+        if not ch_id: continue
+        stored  = cfg.get("roblox_last_version")
+        if stored and stored != version:
+            guild = bot.get_guild(int(gid))
+            if guild:
+                ch = guild.get_channel(int(ch_id))
+                if ch:
+                    e = discord.Embed(
+                        title="🎮  Roblox Update Detected!",
+                        description=(
+                            f"Roblox has pushed a new client update.\n\n"
+                            f"**Previous:** `{stored}`\n"
+                            f"**New version:** `{version}`\n\n"
+                            f"> The game may be temporarily unavailable during rollout."
+                        ),
+                        color=C_ORANGE
+                    )
+                    e.timestamp = now_utc()
+                    e.set_footer(text="TSR Roblox Watcher")
+                    await ch.send(embed=e)
+        cfg["roblox_last_version"] = version
+    save_cfg()
+
+# ── Member Events ──────────────────────────────────────────────────────────
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    # ── Hardban check ───────────────────────────────────────
     gid = str(member.guild.id)
     uid = str(member.id)
     hb  = hardban_db.get(gid, {}).get(uid)
     if hb:
         try:
-            dm_e = discord.Embed(title=f"⛔ You are hardbanned from {member.guild.name}",
-                                  description=f"**Reason:** {hb.get('reason','No reason')}", color=C_RED)
-            await member.send(embed=dm_e)
-        except Exception:
-            pass
+            await member.send(embed=discord.Embed(
+                title=f"⛔  Hardbanned from {member.guild.name}",
+                description=f"**Reason:** {hb.get('reason','No reason')}",
+                color=C_RED))
+        except Exception: pass
         await member.ban(reason=f"Hardban: {hb.get('reason','')}", delete_message_days=0)
         return
 
-    # ── Welcome message ──────────────────────────────────────
-    cfg = gcfg(member.guild.id)
+    cfg   = gcfg(member.guild.id)
     ch_id = cfg.get("welcome_channel")
     if ch_id:
         ch = member.guild.get_channel(int(ch_id))
         if ch:
-            msg = cfg.get("welcome_message", "Welcome {user}!")
-            msg = msg.replace("{user}", member.mention)\
-                     .replace("{username}", str(member))\
-                     .replace("{server}", member.guild.name)\
-                     .replace("{count}", str(member.guild.member_count))
+            msg = (cfg.get("welcome_message")
+                   .replace("{user}", member.mention)
+                   .replace("{username}", str(member))
+                   .replace("{server}", member.guild.name)
+                   .replace("{count}", str(member.guild.member_count)))
             e = discord.Embed(description=msg, color=C_BLUE)
             e.set_author(name=f"Welcome to {member.guild.name}!", icon_url=member.guild.icon.url if member.guild.icon else None)
             e.set_thumbnail(url=member.display_avatar.url)
-            e.set_footer(text=f"Account created {member.created_at.strftime('%b %d, %Y')}")
-            e.timestamp = datetime.datetime.utcnow()
+            e.add_field(name="📅  Account Age", value=f"<t:{int(member.created_at.timestamp())}:R>", inline=True)
+            e.add_field(name="👥  Member #",    value=str(member.guild.member_count), inline=True)
+            e.set_footer(text="TSR Bot  •  Member Join")
+            e.timestamp = now_utc()
             await ch.send(embed=e)
+
+    await send_log(member.guild, _log_embed(
+        "Member Joined", C_GREEN, icon="📥",
+        thumbnail=member.display_avatar.url,
+        fields=[
+            ("👤  User",          f"{member.mention}\n`{member}` • `{member.id}`", True),
+            ("📅  Account Created", f"<t:{int(member.created_at.timestamp())}:R>", True),
+            ("👥  Total Members",   str(member.guild.member_count),                True),
+        ]
+    ))
 
 @bot.event
 async def on_member_remove(member: discord.Member):
-    cfg = gcfg(member.guild.id)
+    cfg   = gcfg(member.guild.id)
     ch_id = cfg.get("goodbye_channel")
     if ch_id:
         ch = member.guild.get_channel(int(ch_id))
         if ch:
-            msg = cfg.get("goodbye_message", "**{user}** has left the server.")
-            msg = msg.replace("{user}", str(member))\
-                     .replace("{username}", str(member))\
-                     .replace("{server}", member.guild.name)
-            e = embed_info("👋 Member Left", msg, color=C_ORANGE)
+            msg = (cfg.get("goodbye_message")
+                   .replace("{user}", str(member))
+                   .replace("{username}", str(member))
+                   .replace("{server}", member.guild.name))
+            e = discord.Embed(description=msg, color=C_ORANGE)
             e.set_thumbnail(url=member.display_avatar.url)
+            e.set_footer(text="TSR Bot  •  Member Leave")
+            e.timestamp = now_utc()
             await ch.send(embed=e)
 
-@bot.event
-async def on_message_delete(message: discord.Message):
-    if message.author.bot or not message.guild:
-        return
-    gid = str(message.guild.id)
-    snipe_db[gid] = {
-        "content":   message.content,
-        "author":    str(message.author),
-        "author_id": message.author.id,
-        "avatar":    str(message.author.display_avatar.url),
-        "channel":   message.channel.id,
-        "time":      datetime.datetime.utcnow().timestamp()
-    }
-    # message delete log
-    cfg = gcfg(message.guild.id)
-    ch_id = cfg.get("log_channel")
-    if ch_id:
-        ch = message.guild.get_channel(int(ch_id))
-        if ch and message.content:
-            e = embed_info(f"{E['edit']} Message Deleted",
-                           f"**Author:** {message.author.mention} (`{message.author}`)\n"
-                           f"**Channel:** {message.channel.mention}\n"
-                           f"**Content:**\n```{message.content[:1000]}```", color=C_ORANGE)
-            await ch.send(embed=e)
+    await send_log(member.guild, _log_embed(
+        "Member Left", C_ORANGE, icon="📤",
+        thumbnail=member.display_avatar.url,
+        fields=[
+            ("👤  User",    f"`{member}` • `{member.id}`", True),
+            ("🎭  Roles",   ", ".join(r.mention for r in member.roles if not r.is_default())[:200] or "None", False),
+        ]
+    ))
 
 @bot.event
-async def on_message_edit(before: discord.Message, after: discord.Message):
-    if before.author.bot or not before.guild or before.content == after.content:
-        return
-    gid = str(before.guild.id)
-    editsnipe_db[gid] = {
-        "before":    before.content,
-        "after":     after.content,
-        "author":    str(before.author),
-        "author_id": before.author.id,
-        "avatar":    str(before.author.display_avatar.url),
-        "channel":   before.channel.id,
-        "time":      datetime.datetime.utcnow().timestamp(),
-        "jump_url":  after.jump_url,
-    }
-    cfg = gcfg(before.guild.id)
-    ch_id = cfg.get("log_channel")
-    if ch_id:
-        ch = before.guild.get_channel(int(ch_id))
-        if ch:
-            e = embed_info(f"{E['edit']} Message Edited",
-                           f"**Author:** {before.author.mention}\n**Channel:** {before.channel.mention}\n"
-                           f"[Jump to message]({after.jump_url})", color=C_YELLOW)
-            e.add_field(name="Before", value=f"```{before.content[:500] or '(empty)'}```", inline=False)
-            e.add_field(name="After",  value=f"```{after.content[:500] or '(empty)'}```",  inline=False)
-            await ch.send(embed=e)
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # Role changes
+    added   = [r for r in after.roles  if r not in before.roles]
+    removed = [r for r in before.roles if r not in after.roles]
+    if added or removed:
+        fields = []
+        if added:   fields.append(("➕  Roles Added",   " ".join(r.mention for r in added),   True))
+        if removed: fields.append(("➖  Roles Removed", " ".join(r.mention for r in removed), True))
+        fields.append(("👤  User", f"{after.mention} `{after.id}`", True))
+        await send_log(after.guild, _log_embed(
+            "Member Roles Updated", C_BLUE, icon="🎭",
+            thumbnail=after.display_avatar.url,
+            fields=fields
+        ))
+    # Nickname changes
+    if before.nick != after.nick:
+        await send_log(after.guild, _log_embed(
+            "Nickname Changed", C_YELLOW, icon="✏️",
+            thumbnail=after.display_avatar.url,
+            fields=[
+                ("👤  User",    f"{after.mention} `{after.id}`", False),
+                ("📛  Before",  f"`{before.nick or before.name}`", True),
+                ("📛  After",   f"`{after.nick or after.name}`",   True),
+            ]
+        ))
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user):
+    # Anti-nuke tracking
+    async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
+        if entry.target and entry.target.id == user.id:
+            await antinuke_check(guild, entry.user.id, "ban")
+            break
+
+@bot.event
+async def on_member_unban(guild: discord.Guild, user):
+    await send_log(guild, _log_embed(
+        "Member Unbanned", C_GREEN, icon="🔓",
+        fields=[("👤  User", f"`{user}` • `{user.id}`", True)]
+    ))
+
+@bot.event
+async def on_guild_channel_create(channel: discord.abc.GuildChannel):
+    await send_log(channel.guild, _log_embed(
+        "Channel Created", C_GREEN, icon="📢",
+        fields=[
+            ("📂  Name",     channel.mention,                 True),
+            ("🏷️  Type",     str(channel.type).title(),       True),
+            ("📁  Category", channel.category.name if channel.category else "None", True),
+        ]
+    ))
+
+@bot.event
+async def on_guild_channel_delete(channel: discord.abc.GuildChannel):
+    # Anti-nuke tracking
+    async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.channel_delete):
+        if entry.target and entry.target.id == channel.id:
+            await antinuke_check(channel.guild, entry.user.id, "channel_delete")
+            break
+    await send_log(channel.guild, _log_embed(
+        "Channel Deleted", C_RED, icon="🗑️",
+        fields=[
+            ("📂  Name",     f"`#{channel.name}`",            True),
+            ("🏷️  Type",     str(channel.type).title(),       True),
+            ("📁  Category", channel.category.name if channel.category else "None", True),
+        ]
+    ))
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    changes = []
+    if before.name != after.name:
+        changes.append(("📛  Name", f"`{before.name}` → `{after.name}`", True))
+    if hasattr(before, "topic") and before.topic != after.topic:
+        changes.append(("📝  Topic", f"*changed*", True))
+    if hasattr(before, "slowmode_delay") and before.slowmode_delay != after.slowmode_delay:
+        changes.append(("🐢  Slowmode", f"{before.slowmode_delay}s → {after.slowmode_delay}s", True))
+    if changes:
+        await send_log(after.guild, _log_embed(
+            "Channel Updated", C_YELLOW, icon="✏️",
+            fields=[("📂  Channel", after.mention, False)] + changes
+        ))
+
+@bot.event
+async def on_guild_role_create(role: discord.Role):
+    await send_log(role.guild, _log_embed(
+        "Role Created", C_GREEN, icon="🎭",
+        fields=[
+            ("🏷️  Name",  role.mention, True),
+            ("🎨  Color", str(role.color), True),
+        ]
+    ))
+
+@bot.event
+async def on_guild_role_delete(role: discord.Role):
+    async for entry in role.guild.audit_logs(limit=1, action=discord.AuditLogAction.role_delete):
+        if entry.target and entry.target.id == role.id:
+            await antinuke_check(role.guild, entry.user.id, "role_delete")
+            break
+    await send_log(role.guild, _log_embed(
+        "Role Deleted", C_RED, icon="🗑️",
+        fields=[
+            ("🏷️  Name",  f"`{role.name}`", True),
+            ("🎨  Color", str(role.color),  True),
+        ]
+    ))
+
+@bot.event
+async def on_guild_role_update(before: discord.Role, after: discord.Role):
+    changes = []
+    if before.name != after.name:
+        changes.append(("📛  Name",  f"`{before.name}` → `{after.name}`",     True))
+    if before.color != after.color:
+        changes.append(("🎨  Color", f"`{before.color}` → `{after.color}`",   True))
+    if before.permissions != after.permissions:
+        changes.append(("🔑  Permissions", "*permissions changed*", True))
+    if changes:
+        await send_log(after.guild, _log_embed(
+            "Role Updated", C_YELLOW, icon="✏️",
+            fields=[("🎭  Role", after.mention, False)] + changes
+        ))
+
+@bot.event
+async def on_invite_create(invite: discord.Invite):
+    await send_log(invite.guild, _log_embed(
+        "Invite Created", C_TEAL, icon="🔗",
+        fields=[
+            ("🔗  Code",    f"`{invite.code}`",                           True),
+            ("👤  Creator", f"{invite.inviter.mention if invite.inviter else 'Unknown'}", True),
+            ("📌  Channel", invite.channel.mention if invite.channel else "?", True),
+            ("🔢  Max Uses", str(invite.max_uses) if invite.max_uses else "∞", True),
+        ]
+    ))
+
+@bot.event
+async def on_invite_delete(invite: discord.Invite):
+    await send_log(invite.guild, _log_embed(
+        "Invite Deleted", C_ORANGE, icon="🚫",
+        fields=[("🔗  Code", f"`{invite.code}`", True)]
+    ))
+
+@bot.event
+async def on_webhooks_update(channel: discord.TextChannel):
+    # Anti-nuke: detect webhook creation
+    async for entry in channel.guild.audit_logs(limit=1, action=discord.AuditLogAction.webhook_create):
+        await antinuke_check(channel.guild, entry.user.id, "webhook_create")
+        break
 
 @bot.event
 async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
-    cfg = gcfg(member.guild.id)
-    ch_id = cfg.get("log_channel")
-    if not ch_id:
-        return
-    ch = member.guild.get_channel(int(ch_id))
-    if not ch:
-        return
     if before.channel is None and after.channel is not None:
-        e = embed_info(f"{E['voice']} Voice Join", f"{member.mention} joined **{after.channel.name}**", color=C_GREEN)
+        log = f"{member.mention} joined **{after.channel.name}**"
+        icon, col = "🔊", C_GREEN
     elif before.channel is not None and after.channel is None:
-        e = embed_info(f"{E['voice']} Voice Leave", f"{member.mention} left **{before.channel.name}**", color=C_ORANGE)
+        log = f"{member.mention} left **{before.channel.name}**"
+        icon, col = "🔇", C_ORANGE
     elif before.channel != after.channel:
-        e = embed_info(f"{E['voice']} Voice Move",
-                       f"{member.mention} moved from **{before.channel.name}** → **{after.channel.name}**", color=C_YELLOW)
+        log = f"{member.mention} moved **{before.channel.name}** → **{after.channel.name}**"
+        icon, col = "🔀", C_YELLOW
     else:
         return
-    await ch.send(embed=e)
+    await send_log(member.guild, _log_embed(
+        "Voice State Update", col, icon=icon,
+        thumbnail=member.display_avatar.url,
+        fields=[("👤  Member", f"`{member}`", True), ("📝  Detail", log, False)]
+    ))
+
+@bot.event
+async def on_message_delete(message: discord.Message):
+    if message.author.bot or not message.guild: return
+    gid = str(message.guild.id)
+    snipe_db[gid] = {
+        "content": message.content, "author": str(message.author),
+        "author_id": message.author.id, "avatar": str(message.author.display_avatar.url),
+        "channel": message.channel.id, "time": now_utc().timestamp()
+    }
+    if message.content:
+        await send_log(message.guild, _log_embed(
+            "Message Deleted", C_ORANGE, icon="🗑️",
+            thumbnail=message.author.display_avatar.url,
+            fields=[
+                ("👤  Author",  f"{message.author.mention} `{message.author}`",  True),
+                ("📂  Channel", message.channel.mention,                         True),
+                ("📝  Content", f"```{message.content[:900]}```",                False),
+            ]
+        ))
+
+@bot.event
+async def on_message_edit(before: discord.Message, after: discord.Message):
+    if before.author.bot or not before.guild or before.content == after.content: return
+    gid = str(before.guild.id)
+    editsnipe_db[gid] = {
+        "before": before.content, "after": after.content,
+        "author": str(before.author), "author_id": before.author.id,
+        "avatar": str(before.author.display_avatar.url),
+        "channel": before.channel.id, "time": now_utc().timestamp(),
+        "jump_url": after.jump_url,
+    }
+    await send_log(before.guild, _log_embed(
+        "Message Edited", C_YELLOW, icon="✏️",
+        thumbnail=before.author.display_avatar.url,
+        fields=[
+            ("👤  Author",  f"{before.author.mention} `{before.author}`", False),
+            ("📂  Channel", before.channel.mention, True),
+            ("🔗  Jump",    f"[View message]({after.jump_url})",          True),
+            ("📝  Before",  f"```{before.content[:400] or '(empty)'}```", False),
+            ("📝  After",   f"```{after.content[:400] or '(empty)'}```",  False),
+        ]
+    ))
+
+# ── Main message handler ───────────────────────────────────────────────────
 
 @bot.event
 async def on_message(message: discord.Message):
+    # DM → ModMail
+    if not message.guild and not message.author.bot:
+        await _handle_modmail_dm(message)
+        return
+
     if message.author.bot or not message.guild:
         await bot.process_commands(message)
         return
 
     guild_id = str(message.guild.id)
     user_id  = str(message.author.id)
-    now      = datetime.datetime.utcnow().timestamp()
+    now      = now_utc().timestamp()
     cfg      = gcfg(message.guild.id)
 
-    # ── Anti-spam ────────────────────────────────────────────
+    # AFK return
+    gafk = afk_db.get(guild_id, {})
+    if user_id in gafk:
+        del gafk[user_id]
+        afk_db[guild_id] = gafk
+        save_json("afk.json", afk_db)
+        try:
+            await message.channel.send(
+                embed=_e_success("Welcome Back!", f"{message.author.mention}, your AFK has been removed."),
+                delete_after=6)
+        except Exception: pass
+        try:
+            nick = message.author.display_name
+            if nick.startswith("[AFK] "): nick = nick[6:]
+            await message.author.edit(nick=nick)
+        except Exception: pass
+
+    # Notify when pinging an AFK user
+    for m in message.mentions:
+        mid = str(m.id)
+        if mid in gafk:
+            d = gafk[mid]
+            e = discord.Embed(
+                title="💤  User is AFK",
+                description=(f"{m.mention} is AFK.\n"
+                             f"**Reason:** {d.get('reason','AFK')}\n"
+                             f"**Since:** <t:{int(d.get('since',now))}:R>"),
+                color=C_YELLOW
+            )
+            await message.channel.send(embed=e, delete_after=10)
+
+    # XP
+    xp, level, levelled = add_xp(guild_id, user_id)
+    if levelled:
+        lvl_ch_id = cfg.get("level_channel")
+        lvl_ch    = message.guild.get_channel(int(lvl_ch_id)) if lvl_ch_id else message.channel
+        msg_text  = (cfg.get("level_up_msg", "{user} levelled up to **Level {level}**! 🎉")
+                     .replace("{user}", message.author.mention).replace("{level}", str(level)))
+        e = discord.Embed(title="🏅  Level Up!", description=msg_text, color=C_PINK)
+        e.set_thumbnail(url=message.author.display_avatar.url)
+        e.add_field(name="✨  XP",    value=f"{xp:,}", inline=True)
+        e.add_field(name="🏅  Level", value=str(level), inline=True)
+        try: await lvl_ch.send(embed=e)
+        except Exception: pass
+
+    # Anti-spam
     antispam_db.setdefault(guild_id, {}).setdefault(user_id, [])
     antispam_db[guild_id][user_id] = [t for t in antispam_db[guild_id][user_id] if now - t < ANTISPAM_WINDOW]
     antispam_db[guild_id][user_id].append(now)
-    if len(antispam_db[guild_id][user_id]) >= ANTISPAM_LIMIT:
-        if not is_automod_exempt(message.author):
-            antispam_db[guild_id][user_id] = []
-            try:
-                await message.channel.purge(limit=ANTISPAM_LIMIT, check=lambda m: m.author == message.author)
-            except Exception:
-                pass
-            try:
-                await message.author.timeout(datetime.timedelta(minutes=5), reason="AutoMod: Spam")
-            except Exception:
-                pass
-            warn_user(guild_id, user_id, "AutoMod: Spamming", "AutoMod")
-            e = embed_error("⚡ Anti-Spam", f"{message.author.mention} was timed out 5 min for spamming.")
-            e.set_footer(text="AutoMod System")
-            await message.channel.send(embed=e, delete_after=8)
-            await send_log(message.guild, embed_mod("AutoMod: Spam", "⚡", message.guild.me, message.author, "Spamming", C_ORANGE))
-            await bot.process_commands(message)
-            return
+    if len(antispam_db[guild_id][user_id]) >= ANTISPAM_LIMIT and not is_automod_exempt(message.author):
+        antispam_db[guild_id][user_id] = []
+        try: await message.channel.purge(limit=ANTISPAM_LIMIT, check=lambda m: m.author == message.author)
+        except Exception: pass
+        try: await message.author.timeout(datetime.timedelta(minutes=5), reason="AutoMod: Spam")
+        except Exception: pass
+        warn_user(guild_id, user_id, "AutoMod: Spamming", "AutoMod")
+        e = discord.Embed(
+            title="⚡  Anti-Spam Triggered",
+            description=f"{message.author.mention} was **timed out 5 minutes** for spamming.",
+            color=C_ORANGE
+        )
+        e.set_footer(text="AutoMod System")
+        await message.channel.send(embed=e, delete_after=8)
+        await send_log(message.guild, _log_embed(
+            "AutoMod: Spam Detected", C_ORANGE, icon="⚡",
+            thumbnail=message.author.display_avatar.url,
+            fields=[
+                ("👤  User",    f"{message.author.mention} `{message.author.id}`", True),
+                ("📂  Channel", message.channel.mention,                           True),
+                ("⏱️  Timeout", "5 minutes",                                       True),
+            ]
+        ))
+        await bot.process_commands(message)
+        return
 
     if not is_automod_exempt(message.author):
-        # ── Anti-links ───────────────────────────────────────
+        # Anti-links
         if cfg.get("automod_links") and re.search(r"(https?://|discord\.gg/|www\.)", message.content, re.I):
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            await message.channel.send(embed=embed_error("🚫 Links Blocked", f"{message.author.mention}, links are not allowed here."), delete_after=6)
+            try: await message.delete()
+            except Exception: pass
+            await message.channel.send(
+                embed=discord.Embed(title="🚫  Links Blocked",
+                                    description=f"{message.author.mention}, links are not allowed here.",
+                                    color=C_RED),
+                delete_after=6)
+            await send_log(message.guild, _log_embed(
+                "AutoMod: Link Blocked", C_RED, icon="🔗",
+                thumbnail=message.author.display_avatar.url,
+                fields=[
+                    ("👤  User",    f"{message.author.mention}", True),
+                    ("📂  Channel", message.channel.mention,     True),
+                    ("📝  Content", f"```{message.content[:300]}```", False),
+                ]
+            ))
             await bot.process_commands(message)
             return
 
-        # ── Anti-caps ────────────────────────────────────────
+        # Anti-caps
         if cfg.get("automod_caps"):
             content = message.content
             if len(content) >= cfg.get("automod_caps_min", 10):
-                caps_count = sum(1 for c in content if c.isupper())
-                total_alpha = sum(1 for c in content if c.isalpha())
-                if total_alpha > 0 and (caps_count / total_alpha * 100) >= cfg.get("automod_caps_pct", 80):
-                    try:
-                        await message.delete()
-                    except Exception:
-                        pass
-                    await message.channel.send(embed=embed_error("🚫 Caps Filter", f"{message.author.mention}, please avoid excessive caps."), delete_after=6)
+                caps  = sum(1 for c in content if c.isupper())
+                total = sum(1 for c in content if c.isalpha())
+                if total > 0 and (caps / total * 100) >= cfg.get("automod_caps_pct", 80):
+                    try: await message.delete()
+                    except Exception: pass
+                    await message.channel.send(
+                        embed=discord.Embed(title="🚫  Excessive Caps",
+                                            description=f"{message.author.mention}, please avoid excessive caps.",
+                                            color=C_RED),
+                        delete_after=6)
+                    await send_log(message.guild, _log_embed(
+                        "AutoMod: Caps Filter", C_ORANGE, icon="🔤",
+                        thumbnail=message.author.display_avatar.url,
+                        fields=[("👤  User", f"{message.author.mention}", True),
+                                ("📂  Channel", message.channel.mention, True)]
+                    ))
                     await bot.process_commands(message)
                     return
 
-        # ── Bad words filter ─────────────────────────────────
-        bad_words = cfg.get("automod_badwords", [])
-        if bad_words:
-            content_lower = message.content.lower()
-            for word in bad_words:
-                if word.lower() in content_lower:
-                    try:
-                        await message.delete()
-                    except Exception:
-                        pass
-                    await message.channel.send(embed=embed_error("🚫 Filtered Word", f"{message.author.mention}, that word is not allowed here."), delete_after=6)
-                    warn_user(guild_id, user_id, f"AutoMod: Filtered word", "AutoMod")
-                    await bot.process_commands(message)
-                    return
+        # Bad words
+        for word in cfg.get("automod_badwords", []):
+            if word.lower() in message.content.lower():
+                try: await message.delete()
+                except Exception: pass
+                await message.channel.send(
+                    embed=discord.Embed(title="🚫  Filtered Word",
+                                        description=f"{message.author.mention}, that word is not allowed.",
+                                        color=C_RED),
+                    delete_after=6)
+                warn_user(guild_id, user_id, "AutoMod: Filtered word", "AutoMod")
+                await send_log(message.guild, _log_embed(
+                    "AutoMod: Bad Word", C_RED, icon="🤐",
+                    thumbnail=message.author.display_avatar.url,
+                    fields=[("👤  User", f"{message.author.mention}", True),
+                            ("📂  Channel", message.channel.mention, True),
+                            ("🔤  Word", f"||{word}||", True)]
+                ))
+                await bot.process_commands(message)
+                return
 
     await bot.process_commands(message)
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║              SETUP COMMANDS (ADMIN)                      ║
-# ╚══════════════════════════════════════════════════════════╝
+# Staff replies in modmail threads
+@bot.listen("on_message")
+async def on_modmail_staff_reply(message: discord.Message):
+    if message.author.bot or not message.guild: return
+    ch_id = str(message.channel.id)
+    uid   = next((u for u, t in modmail_db.items() if t == ch_id), None)
+    if uid is None: return
+    if message.content.startswith("/") or message.content.startswith("!"): return
+    try:
+        user = await bot.fetch_user(int(uid))
+        e = discord.Embed(
+            title=f"📨  Reply from {message.guild.name} Staff",
+            description=message.content or "(no text)",
+            color=C_PURPLE
+        )
+        e.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
+        e.set_footer(text="Reply to this DM to continue • TSR ModMail")
+        e.timestamp = now_utc()
+        files = []
+        for att in message.attachments:
+            try: files.append(await att.to_file())
+            except Exception: pass
+        await user.send(embed=e, files=files)
+        await message.add_reaction("📨")
+    except discord.Forbidden:
+        await message.channel.send(embed=_e_error("DMs Closed", "User has DMs disabled."), delete_after=8)
+    except Exception as ex:
+        await message.channel.send(embed=_e_error("Failed", str(ex)), delete_after=8)
 
-# ── /setuplog ────────────────────────────────────────────────
-@bot.tree.command(name="setuplog", description="Set the moderation log channel")
-@app_commands.describe(channel="The channel to send logs to")
+# ── ModMail DM handler ─────────────────────────────────────────────────────
+
+async def _handle_modmail_dm(message: discord.Message):
+    uid = str(message.author.id)
+    handled = False
+    for gid, cfg in guild_config.items():
+        mm_ch_id = cfg.get("modmail_channel")
+        if not mm_ch_id: continue
+        guild  = bot.get_guild(int(gid))
+        if not guild: continue
+        member = guild.get_member(message.author.id)
+        if not member: continue
+        mm_ch  = guild.get_channel(int(mm_ch_id))
+        if not mm_ch: continue
+
+        thread_id = modmail_db.get(uid)
+        thread    = None
+        if thread_id:
+            try: thread = await guild.fetch_channel(int(thread_id))
+            except Exception: thread = None
+
+        if thread is None:
+            cat_id = cfg.get("modmail_category")
+            cat    = guild.get_channel(int(cat_id)) if cat_id else None
+            ow = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
+            }
+            sr_id = cfg.get("ticket_support_role")
+            if sr_id:
+                sr = guild.get_role(int(sr_id))
+                if sr: ow[sr] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            try:
+                thread = await guild.create_text_channel(
+                    name=f"mail-{message.author.name[:20]}", category=cat,
+                    overwrites=ow, reason=f"ModMail: {message.author}")
+            except Exception: continue
+            modmail_db[uid] = str(thread.id)
+            save_json("modmail.json", modmail_db)
+
+            intro = discord.Embed(
+                title="📨  New ModMail Thread",
+                description=(
+                    f"**From:** {message.author.mention} (`{message.author}` • `{message.author.id}`)\n"
+                    f"**Account Created:** <t:{int(message.author.created_at.timestamp())}:R>\n\n"
+                    f"Reply in this channel — the user will receive your message as a DM.\n"
+                    f"Use `/mmclose` to archive and close."
+                ),
+                color=C_BLUE
+            )
+            intro.set_thumbnail(url=message.author.display_avatar.url)
+            intro.set_footer(text="TSR ModMail System")
+            intro.timestamp = now_utc()
+            await thread.send(embed=intro)
+
+            await message.author.send(embed=discord.Embed(
+                title="📨  ModMail Opened",
+                description=(f"Your message has been forwarded to the staff of **{guild.name}**.\n"
+                             f"Staff will reply here. Please be patient!"),
+                color=C_GREEN
+            ))
+
+        # Forward the DM
+        e = discord.Embed(description=message.content or "(no text)", color=C_BLUE)
+        e.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
+        e.set_footer(text=f"UserID: {message.author.id}  •  DM Message")
+        e.timestamp = now_utc()
+        files = []
+        for att in message.attachments:
+            try: files.append(await att.to_file())
+            except Exception: pass
+        await thread.send(embed=e, files=files)
+        handled = True
+
+    if handled:
+        try: await message.add_reaction("✅")
+        except Exception: pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  PERMISSION MANAGEMENT COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="setpermission",
+                  description="Grant or revoke a role's access to a command group")
+@app_commands.describe(
+    group="Command group: moderation | utility | community | setup",
+    role="Role to grant/revoke access to this group",
+    command="Optional: override for a single command name"
+)
+@app_commands.default_permissions(administrator=True)
+async def setpermission(interaction: discord.Interaction,
+                         group: str, role: discord.Role, command: str = None):
+    if group not in CMD_GROUPS and not command:
+        return await interaction.response.send_message(
+            embed=_e_error("Invalid Group",
+                           f"Choose from: `{'` `'.join(CMD_GROUPS.keys())}`"),
+            ephemeral=True)
+
+    gid = str(interaction.guild.id)
+    cmd_perms_db.setdefault(gid, {})
+    key = command if command else group
+    cmd_perms_db[gid].setdefault(key, [])
+    rid = str(role.id)
+
+    if rid in cmd_perms_db[gid][key]:
+        cmd_perms_db[gid][key].remove(rid)
+        action = f"Removed {role.mention} from `{key}`"
+    else:
+        cmd_perms_db[gid][key].append(rid)
+        action = f"Granted {role.mention} access to `{key}`"
+
+    save_json("cmd_perms.json", cmd_perms_db)
+    e = _e_success("Permission Updated", action)
+    e.add_field(name="Group/Command", value=f"`{key}`", inline=True)
+    e.add_field(name="Role",          value=role.mention, inline=True)
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="viewpermissions", description="View which roles can access a command group")
+@app_commands.describe(group="Command group to inspect")
+@app_commands.default_permissions(administrator=True)
+async def viewpermissions(interaction: discord.Interaction, group: str = None):
+    gid  = str(interaction.guild.id)
+    data = cmd_perms_db.get(gid, {})
+    e    = discord.Embed(title="🔑  Command Permissions", color=C_BLUE)
+    e.set_footer(text="TSR Permission System")
+    keys = [group] if group else list(CMD_GROUPS.keys())
+    for k in keys:
+        role_ids = data.get(k, [])
+        roles    = [interaction.guild.get_role(int(r)) for r in role_ids if interaction.guild.get_role(int(r))]
+        e.add_field(
+            name=f"📂  {k.title()}",
+            value=" ".join(r.mention for r in roles) if roles else "*(admins only)*",
+            inline=False
+        )
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ANTI-NUKE SETUP
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="setupantinuke", description="Configure the Anti-Nuke protection system")
+@app_commands.describe(
+    enabled="Enable or disable anti-nuke (true/false)",
+    action="Response action: strip | kick | ban",
+    bans="Max bans before triggering (default 3)",
+    kicks="Max kicks before triggering (default 5)",
+    channels="Max channel deletes before triggering (default 3)",
+    roles="Max role deletes before triggering (default 3)",
+    window="Time window in seconds (default 10)",
+    whitelist_role="Role immune to anti-nuke (toggle)"
+)
+@app_commands.default_permissions(administrator=True)
+async def setupantinuke(interaction: discord.Interaction,
+                         enabled: bool = None, action: str = None,
+                         bans: int = None, kicks: int = None,
+                         channels: int = None, roles: int = None,
+                         window: int = None, whitelist_role: discord.Role = None):
+    cfg = gcfg(interaction.guild.id)
+    changes = []
+    if enabled  is not None: cfg["antinuke_enabled"] = enabled;           changes.append(f"Enabled: `{enabled}`")
+    if action   is not None:
+        if action not in ("strip","kick","ban"):
+            return await interaction.response.send_message(
+                embed=_e_error("Invalid Action","Choose `strip`, `kick`, or `ban`."), ephemeral=True)
+        cfg["antinuke_action"] = action;     changes.append(f"Action: `{action}`")
+    if bans     is not None: cfg["antinuke_threshold_bans"]     = bans;     changes.append(f"Ban threshold: `{bans}`")
+    if kicks    is not None: cfg["antinuke_threshold_kicks"]    = kicks;    changes.append(f"Kick threshold: `{kicks}`")
+    if channels is not None: cfg["antinuke_threshold_channels"] = channels; changes.append(f"Channel del threshold: `{channels}`")
+    if roles    is not None: cfg["antinuke_threshold_roles"]    = roles;    changes.append(f"Role del threshold: `{roles}`")
+    if window   is not None: cfg["antinuke_window"]             = window;   changes.append(f"Window: `{window}s`")
+    if whitelist_role:
+        rid = str(whitelist_role.id)
+        if rid in cfg["antinuke_whitelist"]:
+            cfg["antinuke_whitelist"].remove(rid)
+            changes.append(f"Removed whitelist: {whitelist_role.mention}")
+        else:
+            cfg["antinuke_whitelist"].append(rid)
+            changes.append(f"Added whitelist: {whitelist_role.mention}")
+    save_cfg()
+
+    wl_roles = [interaction.guild.get_role(int(r)) for r in cfg["antinuke_whitelist"] if interaction.guild.get_role(int(r))]
+    e = _e_success("Anti-Nuke Updated", "\n".join(changes) or "No changes.")
+    e.add_field(name="Status",     value="`ON`" if cfg["antinuke_enabled"] else "`OFF`",     inline=True)
+    e.add_field(name="Action",     value=f"`{cfg['antinuke_action']}`",                       inline=True)
+    e.add_field(name="Window",     value=f"`{cfg['antinuke_window']}s`",                      inline=True)
+    e.add_field(name="Thresholds", value=(
+        f"Bans: `{cfg['antinuke_threshold_bans']}`  •  "
+        f"Kicks: `{cfg['antinuke_threshold_kicks']}`  •  "
+        f"Ch-Del: `{cfg['antinuke_threshold_channels']}`  •  "
+        f"Role-Del: `{cfg['antinuke_threshold_roles']}`"
+    ), inline=False)
+    e.add_field(name="Whitelist",  value=" ".join(r.mention for r in wl_roles) or "None", inline=False)
+    await interaction.response.send_message(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SETUP COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="setuplog", description="Set the server log channel")
 @app_commands.default_permissions(administrator=True)
 async def setuplog(interaction: discord.Interaction, channel: discord.TextChannel):
-    cfg = gcfg(interaction.guild.id)
-    cfg["log_channel"] = str(channel.id)
-    save_cfg()
-    await interaction.response.send_message(
-        embed=embed_success("Log Channel Set", f"All mod logs will be sent to {channel.mention}."))
+    gcfg(interaction.guild.id)["log_channel"] = str(channel.id); save_cfg()
+    e = _e_success("Log Channel Set",
+                   f"All events will be logged in {channel.mention}.\n\n"
+                   f"**Logged events include:**\n"
+                   f"Bans, kicks, timeouts, warns, purges, message edits/deletes, "
+                   f"member joins/leaves, voice changes, role changes, nickname changes, "
+                   f"channel create/delete, anti-spam, anti-nuke, filtered words, and more.")
+    await interaction.response.send_message(embed=e)
 
-# ── /setupwelcome ────────────────────────────────────────────
 @bot.tree.command(name="setupwelcome", description="Configure the welcome message")
-@app_commands.describe(
-    channel="Welcome channel",
-    message="Message (use {user} {username} {server} {count})"
-)
+@app_commands.describe(channel="Welcome channel", message="Use {user} {username} {server} {count}")
 @app_commands.default_permissions(administrator=True)
 async def setupwelcome(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
     cfg = gcfg(interaction.guild.id)
     cfg["welcome_channel"] = str(channel.id)
-    if message:
-        cfg["welcome_message"] = message
+    if message: cfg["welcome_message"] = message
     save_cfg()
-    e = embed_success("Welcome Configured", f"Welcome messages will be sent to {channel.mention}.")
-    e.add_field(name="Message Template", value=cfg["welcome_message"], inline=False)
+    e = _e_success("Welcome Configured", f"Welcome messages → {channel.mention}")
+    e.add_field(name="Template", value=cfg["welcome_message"], inline=False)
     e.add_field(name="Variables", value="`{user}` `{username}` `{server}` `{count}`", inline=False)
     await interaction.response.send_message(embed=e)
 
-# ── /setupgoodbye ────────────────────────────────────────────
 @bot.tree.command(name="setupgoodbye", description="Configure the goodbye message")
-@app_commands.describe(channel="Goodbye channel", message="Message (use {user} {username} {server})")
 @app_commands.default_permissions(administrator=True)
 async def setupgoodbye(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
     cfg = gcfg(interaction.guild.id)
     cfg["goodbye_channel"] = str(channel.id)
-    if message:
-        cfg["goodbye_message"] = message
+    if message: cfg["goodbye_message"] = message
     save_cfg()
-    e = embed_success("Goodbye Configured", f"Goodbye messages will be sent to {channel.mention}.")
-    e.add_field(name="Message Template", value=cfg["goodbye_message"], inline=False)
+    e = _e_success("Goodbye Configured", f"Goodbye messages → {channel.mention}")
+    e.add_field(name="Template", value=cfg["goodbye_message"], inline=False)
     await interaction.response.send_message(embed=e)
 
-# ── /setuplock ───────────────────────────────────────────────
-@bot.tree.command(name="setuplock", description="Configure what /lock and /unlock affect")
-@app_commands.describe(
-    exempt_role="Role that stays exempt from locks (can be used multiple times; use 'clear' name to reset)",
-    permission="Permission to deny on lock: send_messages | add_reactions | use_slash_commands | all"
-)
+@bot.tree.command(name="setuproblox", description="Enable Roblox update notifications")
+@app_commands.default_permissions(administrator=True)
+async def setuproblox(interaction: discord.Interaction, channel: discord.TextChannel):
+    gcfg(interaction.guild.id)["roblox_channel"] = str(channel.id); save_cfg()
+    await interaction.response.send_message(embed=_e_success(
+        "Roblox Watcher Enabled",
+        f"Roblox update alerts → {channel.mention}\nChecks every 5 minutes."))
+
+@bot.tree.command(name="setupsuggestions", description="Set the suggestions channel")
+@app_commands.default_permissions(administrator=True)
+async def setupsuggestions(interaction: discord.Interaction, channel: discord.TextChannel):
+    gcfg(interaction.guild.id)["suggestion_channel"] = str(channel.id); save_cfg()
+    await interaction.response.send_message(embed=_e_success(
+        "Suggestions Configured", f"Suggestions → {channel.mention}"))
+
+@bot.tree.command(name="setuplevels", description="Configure the levelling system")
+@app_commands.describe(channel="Level-up channel (blank = same channel)", message="Use {user} and {level}")
+@app_commands.default_permissions(administrator=True)
+async def setuplevels(interaction: discord.Interaction, channel: discord.TextChannel = None, message: str = None):
+    cfg = gcfg(interaction.guild.id)
+    if channel: cfg["level_channel"] = str(channel.id)
+    if message: cfg["level_up_msg"]  = message
+    save_cfg()
+    e = _e_success("Levels Configured", f"Level-up channel: {channel.mention if channel else 'same channel'}")
+    e.add_field(name="Message", value=cfg["level_up_msg"], inline=False)
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="setuplock", description="Configure lock/unlock behaviour")
+@app_commands.describe(exempt_role="Toggle a role as exempt from locks",
+                        permission="Permission to deny: send_messages | add_reactions | all")
 @app_commands.default_permissions(administrator=True)
 async def setuplock(interaction: discord.Interaction,
-                    exempt_role: discord.Role = None,
-                    permission: str = "send_messages"):
+                     exempt_role: discord.Role = None, permission: str = "send_messages"):
     cfg = gcfg(interaction.guild.id)
-    valid_perms = ["send_messages", "add_reactions", "use_application_commands", "all"]
-    if permission not in valid_perms:
+    valid = ["send_messages","add_reactions","use_application_commands","all"]
+    if permission not in valid:
         return await interaction.response.send_message(
-            embed=embed_error("Invalid Permission", f"Choose from: `{'`, `'.join(valid_perms)}`"), ephemeral=True)
-
+            embed=_e_error("Invalid Permission",f"Choose: `{'` `'.join(valid)}`"), ephemeral=True)
     if exempt_role:
         rid = str(exempt_role.id)
-        if rid in cfg["lock_exempt_roles"]:
-            cfg["lock_exempt_roles"].remove(rid)
-            action = f"Removed {exempt_role.mention} from exempt roles."
-        else:
-            cfg["lock_exempt_roles"].append(rid)
-            action = f"Added {exempt_role.mention} as exempt from locks."
+        if rid in cfg["lock_exempt_roles"]: cfg["lock_exempt_roles"].remove(rid); msg = f"Removed {exempt_role.mention} from exempt."
+        else: cfg["lock_exempt_roles"].append(rid); msg = f"Added {exempt_role.mention} as exempt."
     else:
-        action = "No role changed."
-
+        msg = "No role changed."
     cfg["lock_deny_perm"] = permission
     save_cfg()
-
-    exempt_roles = [interaction.guild.get_role(int(r)) for r in cfg["lock_exempt_roles"] if interaction.guild.get_role(int(r))]
-    e = embed_success("Lock Setup Updated", action)
-    e.add_field(name="Locked Permission",
-                value=f"`{cfg['lock_deny_perm']}` (denied for @everyone on lock)", inline=False)
-    e.add_field(name="Exempt Roles",
-                value=" ".join(r.mention for r in exempt_roles) or "@everyone (none exempt)", inline=False)
-    e.add_field(name="Tip", value="Run `/setuplock` again with a role to toggle it on/off the exempt list.", inline=False)
+    exempt = [interaction.guild.get_role(int(r)) for r in cfg["lock_exempt_roles"] if interaction.guild.get_role(int(r))]
+    e = _e_success("Lock Setup Updated", msg)
+    e.add_field(name="Locked Permission", value=f"`{cfg['lock_deny_perm']}`", inline=True)
+    e.add_field(name="Exempt Roles", value=" ".join(r.mention for r in exempt) or "None", inline=True)
     await interaction.response.send_message(embed=e)
 
-# ── /setupverify ─────────────────────────────────────────────
+@bot.tree.command(name="setupautomod", description="Configure AutoMod filters")
+@app_commands.describe(links="Block links", caps="Block excessive caps",
+                        caps_percent="Caps threshold %", caps_min_length="Min length for caps check",
+                        exempt_role="Toggle AutoMod-exempt role")
+@app_commands.default_permissions(administrator=True)
+async def setupautomod(interaction: discord.Interaction,
+                        links: bool = None, caps: bool = None,
+                        caps_percent: int = None, caps_min_length: int = None,
+                        exempt_role: discord.Role = None):
+    cfg = gcfg(interaction.guild.id); changes = []
+    if links    is not None: cfg["automod_links"] = links;              changes.append(f"Anti-Links: `{'ON' if links else 'OFF'}`")
+    if caps     is not None: cfg["automod_caps"]  = caps;              changes.append(f"Anti-Caps: `{'ON' if caps else 'OFF'}`")
+    if caps_percent  is not None: cfg["automod_caps_pct"] = caps_percent;  changes.append(f"Caps %: `{caps_percent}`")
+    if caps_min_length is not None: cfg["automod_caps_min"] = caps_min_length; changes.append(f"Caps min: `{caps_min_length}`")
+    if exempt_role:
+        rid = str(exempt_role.id)
+        if rid in cfg["automod_exempt_roles"]: cfg["automod_exempt_roles"].remove(rid); changes.append(f"Removed exempt: {exempt_role.mention}")
+        else: cfg["automod_exempt_roles"].append(rid); changes.append(f"Added exempt: {exempt_role.mention}")
+    save_cfg()
+    e = _e_success("AutoMod Updated", "\n".join(changes) or "No changes.")
+    e.add_field(name="Status", value=(
+        f"Links: `{'ON' if cfg['automod_links'] else 'OFF'}`\n"
+        f"Caps: `{'ON' if cfg['automod_caps'] else 'OFF'}` ({cfg['automod_caps_pct']}%)\n"
+        f"Bad Words: `{len(cfg['automod_badwords'])} words`"
+    ), inline=False)
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="badword", description="Add or remove a word from the filter")
+@app_commands.default_permissions(administrator=True)
+async def badword(interaction: discord.Interaction, word: str, action: str = "add"):
+    cfg = gcfg(interaction.guild.id); word = word.lower()
+    if action == "add":
+        if word not in cfg["automod_badwords"]: cfg["automod_badwords"].append(word); save_cfg()
+        await interaction.response.send_message(embed=_e_success("Word Added", f"`{word}` added to filter."), ephemeral=True)
+    elif action == "remove":
+        if word in cfg["automod_badwords"]: cfg["automod_badwords"].remove(word); save_cfg()
+        await interaction.response.send_message(embed=_e_success("Word Removed", f"`{word}` removed."), ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=_e_error("Invalid", "Use `add` or `remove`."), ephemeral=True)
+
+@bot.tree.command(name="filterlist", description="List all filtered words")
+@app_commands.default_permissions(administrator=True)
+async def filterlist(interaction: discord.Interaction):
+    cfg = gcfg(interaction.guild.id); words = cfg.get("automod_badwords", [])
+    if not words:
+        return await interaction.response.send_message(embed=_e_info("Filter List","No words in filter."), ephemeral=True)
+    await interaction.response.send_message(
+        embed=_e_info("🚫  Filter List", "```" + ", ".join(words) + "```"), ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  VERIFICATION  (v3 — hardened)
+# ═══════════════════════════════════════════════════════════════════════════
+
+async def _verify_prereqs(interaction: discord.Interaction, member: discord.Member = None) -> tuple[bool, str]:
+    """Check account age and phone-verification requirements. Returns (passed, reason)."""
+    m   = member or interaction.user
+    cfg = gcfg(interaction.guild.id)
+    min_age = cfg.get("verify_min_age_days", 0)
+    if min_age > 0:
+        age_days = (now_utc() - m.created_at).days
+        if age_days < min_age:
+            return False, (f"Your Discord account must be at least **{min_age} days old** to verify.\n"
+                           f"Your account is `{age_days}` day(s) old.")
+    if cfg.get("verify_require_phone") and not m.public_flags.verified_phone:
+        return False, "Your Discord account must have a **verified phone number** to join this server."
+    return True, ""
+
 class VerifyButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Verify Me", style=discord.ButtonStyle.success, emoji="✔️", custom_id="verify_button")
-    async def verify(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Verify Me", style=discord.ButtonStyle.success,
+                       emoji="✔️", custom_id="tsr_verify_v3")
+    async def do_verify(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = gcfg(interaction.guild.id)
+        # Prereqs
+        ok, reason = await _verify_prereqs(interaction)
+        if not ok:
+            return await interaction.response.send_message(
+                embed=_e_error("Cannot Verify", reason), ephemeral=True)
+
+        method = cfg.get("verify_method", "button")
         role_id = cfg.get("verify_role")
         if not role_id:
-            return await interaction.response.send_message(embed=embed_error("Not Configured", "Verify role not set."), ephemeral=True)
+            return await interaction.response.send_message(embed=_e_error("Not Configured","Verify role not set."), ephemeral=True)
         role = interaction.guild.get_role(int(role_id))
         if not role:
-            return await interaction.response.send_message(embed=embed_error("Role Missing", "Verify role not found."), ephemeral=True)
+            return await interaction.response.send_message(embed=_e_error("Role Missing","Verify role not found."), ephemeral=True)
         if role in interaction.user.roles:
-            return await interaction.response.send_message(embed=embed_info("Already Verified", "You are already verified!"), ephemeral=True)
-        await interaction.user.add_roles(role, reason="Self-verification")
-        await interaction.response.send_message(
-            embed=embed_success("Verified!", f"Welcome! You've been given the **{role.name}** role."), ephemeral=True)
-        await send_log(interaction.guild, embed_info(
-            f"{E['verify']} Member Verified",
-            f"{interaction.user.mention} (`{interaction.user}`) verified.", color=C_GREEN))
+            return await interaction.response.send_message(embed=_e_info("Already Verified","You are already verified!"), ephemeral=True)
 
-@bot.tree.command(name="setupverify", description="Set up the verification system (like Carl-bot)")
-@app_commands.describe(
-    channel="Channel to send the verify message in",
-    role="Role to give upon verification",
-    method="Verification method: button | reaction | code",
-    message="Custom verification message"
-)
+        if method == "button":
+            await interaction.user.add_roles(role, reason="Verification: button")
+            e = discord.Embed(title="✅  Verified!", description=f"You've been given **{role.name}**. Welcome!", color=C_GREEN)
+            e.set_thumbnail(url=interaction.user.display_avatar.url)
+            e.set_footer(text=interaction.guild.name)
+            await interaction.response.send_message(embed=e, ephemeral=True)
+            await send_log(interaction.guild, _log_embed(
+                "Member Verified (Button)", C_GREEN, icon="✔️",
+                thumbnail=interaction.user.display_avatar.url,
+                fields=[("👤  User", f"{interaction.user.mention} `{interaction.user.id}`", True),
+                        ("🎭  Role", role.mention, True)]
+            ))
+        elif method == "math":
+            a, b = random.randint(10, 99), random.randint(10, 99)
+            ans  = a + b
+            pending_math[interaction.user.id] = {"answer": ans, "role_id": role_id, "guild_id": interaction.guild.id}
+            dm_e = discord.Embed(
+                title="🧮  Math Verification",
+                description=(
+                    f"To verify in **{interaction.guild.name}**, solve this:\n\n"
+                    f"## `{a} + {b} = ?`\n\n"
+                    f"Use `/verify <answer>` in the server."
+                ),
+                color=C_BLUE
+            )
+            dm_e.set_footer(text="This code expires in 5 minutes.")
+            try:
+                await interaction.user.send(embed=dm_e)
+                await interaction.response.send_message(
+                    embed=_e_info("📩  Check Your DMs", "A math verification was sent to your DMs."), ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    embed=_e_error("DMs Closed", "Enable DMs from server members, then try again."), ephemeral=True)
+        elif method == "code":
+            code = "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            pending_codes[interaction.user.id] = {"code": code, "role_id": role_id, "guild_id": interaction.guild.id}
+            dm_e = discord.Embed(
+                title="🔑  Verification Code",
+                description=(
+                    f"Your code for **{interaction.guild.name}**:\n\n"
+                    f"## `{code}`\n\n"
+                    f"Use `/verify {code}` in the server."
+                ),
+                color=C_BLUE
+            )
+            dm_e.set_footer(text="Code expires in 5 minutes.")
+            try:
+                await interaction.user.send(embed=dm_e)
+                await interaction.response.send_message(
+                    embed=_e_info("📩  Check Your DMs","A verification code was sent to your DMs."), ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    embed=_e_error("DMs Closed","Enable DMs from server members."), ephemeral=True)
+
+@bot.tree.command(name="verify", description="Submit your verification code or answer")
+@app_commands.describe(answer="Your verification code or math answer")
+async def verify_cmd(interaction: discord.Interaction, answer: str):
+    uid = interaction.user.id
+
+    # Math CAPTCHA path
+    if uid in pending_math:
+        d = pending_math[uid]
+        if str(answer).strip() == str(d["answer"]):
+            guild = bot.get_guild(d["guild_id"])
+            role  = guild.get_role(int(d["role_id"])) if guild else None
+            if role and guild:
+                m = guild.get_member(uid)
+                if m: await m.add_roles(role, reason="Verification: math CAPTCHA")
+            del pending_math[uid]
+            await interaction.response.send_message(embed=_e_success("Verified!",f"You've been given **{role.name if role else 'the verify role'}**."), ephemeral=True)
+            if guild and role:
+                await send_log(guild, _log_embed(
+                    "Member Verified (Math CAPTCHA)", C_GREEN, icon="🧮",
+                    thumbnail=interaction.user.display_avatar.url,
+                    fields=[("👤  User", f"{interaction.user.mention} `{interaction.user.id}`", True),
+                            ("🎭  Role", role.mention, True)]
+                ))
+        else:
+            await interaction.response.send_message(embed=_e_error("Wrong Answer","Incorrect. Click the verify button again to get a new question."), ephemeral=True)
+        return
+
+    # Code path
+    if uid in pending_codes:
+        d = pending_codes[uid]
+        if answer.upper().strip() == d["code"].upper():
+            guild = bot.get_guild(d["guild_id"])
+            role  = guild.get_role(int(d["role_id"])) if guild else None
+            if role and guild:
+                m = guild.get_member(uid)
+                if m: await m.add_roles(role, reason="Verification: code")
+            del pending_codes[uid]
+            await interaction.response.send_message(embed=_e_success("Verified!",f"You've been given **{role.name if role else 'the verify role'}**."), ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=_e_error("Wrong Code","Incorrect. Click the verify button again for a new code."), ephemeral=True)
+        return
+
+    await interaction.response.send_message(embed=_e_error("No Pending Verification","Click the verify button first."), ephemeral=True)
+
+@bot.tree.command(name="setupverify", description="Set up the verification system")
+@app_commands.describe(channel="Channel to post the verify panel",
+                        role="Role granted on verification",
+                        method="button | code | math | reaction",
+                        min_age_days="Minimum Discord account age in days (0 = any)",
+                        require_phone="Require phone-verified account",
+                        message="Custom panel message")
 @app_commands.default_permissions(administrator=True)
 async def setupverify(interaction: discord.Interaction,
-                       channel: discord.TextChannel,
-                       role: discord.Role,
-                       method: str = "button",
-                       message: str = None):
-    if method not in ("button", "reaction", "code"):
+                       channel: discord.TextChannel, role: discord.Role,
+                       method: str = "button", min_age_days: int = 0,
+                       require_phone: bool = False, message: str = None):
+    valid_methods = ("button","code","math","reaction")
+    if method not in valid_methods:
         return await interaction.response.send_message(
-            embed=embed_error("Invalid Method", "Choose: `button`, `reaction`, or `code`"), ephemeral=True)
-
+            embed=_e_error("Invalid Method", f"Choose: `{'` `'.join(valid_methods)}`"), ephemeral=True)
     cfg = gcfg(interaction.guild.id)
-    cfg["verify_channel"] = str(channel.id)
-    cfg["verify_role"]    = str(role.id)
-    cfg["verify_method"]  = method
-    if message:
-        cfg["verify_message"] = message
+    cfg["verify_channel"]       = str(channel.id)
+    cfg["verify_role"]          = str(role.id)
+    cfg["verify_method"]        = method
+    cfg["verify_min_age_days"]  = max(0, min_age_days)
+    cfg["verify_require_phone"] = require_phone
+    if message: cfg["verify_message"] = message
     save_cfg()
 
-    verify_msg = cfg["verify_message"]
-    e = discord.Embed(title=f"{E['shield']} Verification Required",
-                      description=verify_msg, color=C_BLUE)
-    e.set_footer(text=f"{interaction.guild.name} • Verification System")
-
-    if method == "button":
+    age_txt   = f"`{min_age_days}d`" if min_age_days > 0 else "None"
+    phone_txt = "Required" if require_phone else "Not required"
+    method_desc = {
+        "button":   "• Click the button — instant verify",
+        "code":     "• Click button → receive a DM code → `/verify <code>`",
+        "math":     "• Click button → receive a DM math question → `/verify <answer>`",
+        "reaction": "• React with ✅ to verify",
+    }[method]
+    e = discord.Embed(
+        title=f"🛡️  Verification System",
+        description=cfg["verify_message"],
+        color=C_BLUE
+    )
+    e.add_field(name="How to Verify", value=method_desc, inline=False)
+    e.set_footer(text=f"{interaction.guild.name}  •  Verification")
+    e.timestamp = now_utc()
+    if method in ("button","code","math"):
         await channel.send(embed=e, view=VerifyButton())
-    elif method == "reaction":
+    else:
         sent = await channel.send(embed=e)
         await sent.add_reaction("✅")
         cfg["verify_message_id"] = str(sent.id)
         save_cfg()
-    elif method == "code":
-        e.description = verify_msg + "\n\n> Run `/verify <code>` — a code will be sent to your DMs."
-        await channel.send(embed=e)
 
-    await interaction.response.send_message(
-        embed=embed_success("Verification Set Up",
-                            f"Verify channel: {channel.mention}\nRole: {role.mention}\nMethod: `{method}`"))
+    res = _e_success("Verification Set Up",
+                     f"Channel: {channel.mention}\nRole: {role.mention}\nMethod: `{method}`")
+    res.add_field(name="Min Account Age", value=age_txt, inline=True)
+    res.add_field(name="Phone Verified",  value=phone_txt, inline=True)
+    await interaction.response.send_message(embed=res)
 
-# ── Reaction-based verify ────────────────────────────────────
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    if payload.user_id == bot.user.id:
-        return
+    if payload.user_id == bot.user.id: return
     guild = bot.get_guild(payload.guild_id)
-    if not guild:
-        return
+    if not guild: return
     cfg = gcfg(guild.id)
-    if cfg.get("verify_method") != "reaction":
-        return
-    if str(payload.message_id) != cfg.get("verify_message_id"):
-        return
-    if str(payload.emoji) != "✅":
-        return
+    if cfg.get("verify_method") != "reaction": return
+    if str(payload.message_id) != cfg.get("verify_message_id"): return
+    if str(payload.emoji) != "✅": return
     role_id = cfg.get("verify_role")
-    if not role_id:
-        return
+    if not role_id: return
     role   = guild.get_role(int(role_id))
     member = guild.get_member(payload.user_id)
-    if role and member and role not in member.roles:
-        await member.add_roles(role, reason="Reaction verification")
-        await send_log(guild, embed_info(f"{E['verify']} Member Verified",
-                                         f"{member.mention} verified via reaction.", color=C_GREEN))
+    if not role or not member or role in member.roles: return
+    ok, reason = await _verify_prereqs(None, member)
+    if not ok:
+        await dm_user(member, _e_error("Cannot Verify", reason))
+        return
+    await member.add_roles(role, reason="Verification: reaction")
+    await send_log(guild, _log_embed(
+        "Member Verified (Reaction)", C_GREEN, icon="✔️",
+        thumbnail=member.display_avatar.url,
+        fields=[("👤  User", f"{member.mention} `{member.id}`", True),
+                ("🎭  Role", role.mention, True)]
+    ))
 
-# ── Code-based verify ────────────────────────────────────────
-pending_codes: dict = {}   # {user_id: code}
+# ═══════════════════════════════════════════════════════════════════════════
+#  TICKET SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════
 
-@bot.tree.command(name="getcode", description="Get a verification code sent to your DMs")
-async def getcode(interaction: discord.Interaction):
-    cfg = gcfg(interaction.guild.id)
-    if cfg.get("verify_method") != "code":
-        return await interaction.response.send_message(embed=embed_error("Not Enabled", "Code verification is not the active method."), ephemeral=True)
-    code = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-    pending_codes[interaction.user.id] = code
-    try:
-        dm_e = discord.Embed(title="🔑 Your Verification Code",
-                              description=f"Your code for **{interaction.guild.name}**:\n\n## `{code}`\n\nUse `/verify {code}` in the server.",
-                              color=C_BLUE)
-        await interaction.user.send(embed=dm_e)
-        await interaction.response.send_message(embed=embed_success("Code Sent", "Check your DMs for the verification code."), ephemeral=True)
-    except discord.Forbidden:
-        await interaction.response.send_message(embed=embed_error("DMs Closed", "Please enable DMs from server members first."), ephemeral=True)
-
-@bot.tree.command(name="verify", description="Enter your verification code")
-@app_commands.describe(code="The 6-character code from your DMs")
-async def verify_code(interaction: discord.Interaction, code: str):
-    cfg = gcfg(interaction.guild.id)
-    if cfg.get("verify_method") != "code":
-        return await interaction.response.send_message(embed=embed_error("Not Enabled", "Code verification is not active."), ephemeral=True)
-    expected = pending_codes.get(interaction.user.id)
-    if not expected or code.upper() != expected:
-        return await interaction.response.send_message(embed=embed_error("Invalid Code", "Incorrect code. Use `/getcode` to get a new one."), ephemeral=True)
-    role_id = cfg.get("verify_role")
-    role    = interaction.guild.get_role(int(role_id)) if role_id else None
-    if not role:
-        return await interaction.response.send_message(embed=embed_error("Role Missing", "Verify role not configured."), ephemeral=True)
-    del pending_codes[interaction.user.id]
-    await interaction.user.add_roles(role, reason="Code verification")
-    await interaction.response.send_message(embed=embed_success("Verified!", f"You've been given the **{role.name}** role."), ephemeral=True)
-    await send_log(interaction.guild, embed_info(f"{E['verify']} Member Verified",
-                                                  f"{interaction.user.mention} verified via code.", color=C_GREEN))
-
-# ── /setuptickets ────────────────────────────────────────────
 class TicketButton(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+    def __init__(self): super().__init__(timeout=None)
 
-    @discord.ui.button(label="Open Ticket", style=discord.ButtonStyle.primary, emoji="🎫", custom_id="ticket_open")
+    @discord.ui.button(label="Open a Ticket", style=discord.ButtonStyle.primary,
+                       emoji="🎫", custom_id="tsr_ticket_open_v3")
     async def open_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         cfg = gcfg(interaction.guild.id)
-        cat_id = cfg.get("ticket_category")
-        cat    = interaction.guild.get_channel(int(cat_id)) if cat_id else None
-
-        # Check if user already has an open ticket
-        existing = discord.utils.get(interaction.guild.text_channels, name=f"ticket-{interaction.user.name.lower()}")
+        cat  = interaction.guild.get_channel(int(cfg["ticket_category"])) if cfg.get("ticket_category") else None
+        existing = discord.utils.get(interaction.guild.text_channels,
+                                      name=f"ticket-{interaction.user.name.lower()[:20]}")
         if existing:
             return await interaction.response.send_message(
-                embed=embed_error("Ticket Exists", f"You already have an open ticket: {existing.mention}"), ephemeral=True)
-
-        cfg["ticket_count"] = cfg.get("ticket_count", 0) + 1
-        save_cfg()
-        ticket_num = cfg["ticket_count"]
-
-        # Build overwrites
-        support_role_id = cfg.get("ticket_support_role")
-        support_role    = interaction.guild.get_role(int(support_role_id)) if support_role_id else None
-        overwrites = {
+                embed=_e_error("Ticket Exists", f"You already have a ticket: {existing.mention}"), ephemeral=True)
+        cfg["ticket_count"] = cfg.get("ticket_count", 0) + 1; save_cfg()
+        num = cfg["ticket_count"]
+        sr  = interaction.guild.get_role(int(cfg["ticket_support_role"])) if cfg.get("ticket_support_role") else None
+        ow  = {
             interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user:               discord.PermissionOverwrite(view_channel=True, send_messages=True, attach_files=True),
             interaction.guild.me:           discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
         }
-        if support_role:
-            overwrites[support_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-
+        if sr: ow[sr] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         try:
-            channel = await interaction.guild.create_text_channel(
-                name=f"ticket-{ticket_num:04d}",
-                category=cat,
-                overwrites=overwrites,
-                reason=f"Ticket by {interaction.user}"
-            )
+            ch = await interaction.guild.create_text_channel(
+                name=f"ticket-{num:04d}", category=cat, overwrites=ow,
+                reason=f"Ticket by {interaction.user}")
         except Exception as ex:
-            return await interaction.response.send_message(embed=embed_error("Failed", str(ex)), ephemeral=True)
+            return await interaction.response.send_message(embed=_e_error("Failed", str(ex)), ephemeral=True)
 
-        e = discord.Embed(title=f"🎫 Ticket #{ticket_num:04d}",
-                          description=f"Hello {interaction.user.mention}!\n\nDescribe your issue and our staff will assist you shortly.\n\nTo close this ticket, click the button below.",
-                          color=C_BLUE)
-        e.set_footer(text=f"Opened by {interaction.user}")
-        e.timestamp = datetime.datetime.utcnow()
-        await channel.send(
-            content=f"{interaction.user.mention}" + (f" {support_role.mention}" if support_role else ""),
-            embed=e,
-            view=TicketCloseButton()
+        e = discord.Embed(
+            title=f"🎫  Ticket #{num:04d}",
+            description=(
+                f"Hello {interaction.user.mention}!\n\n"
+                f"Please describe your issue and a staff member will assist you shortly.\n\n"
+                f"> Press **Close Ticket** when your issue is resolved."
+            ),
+            color=C_BLUE
         )
-        await interaction.response.send_message(
-            embed=embed_success("Ticket Opened", f"Your ticket has been created: {channel.mention}"), ephemeral=True)
+        e.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
+        e.set_footer(text=f"Ticket #{num:04d}  •  TSR Support")
+        e.timestamp = now_utc()
+        await ch.send(content=f"{interaction.user.mention}" + (f" {sr.mention}" if sr else ""),
+                      embed=e, view=TicketCloseView())
+        await interaction.response.send_message(embed=_e_success("Ticket Opened", f"Your ticket: {ch.mention}"), ephemeral=True)
+        await send_log(interaction.guild, _log_embed(
+            "Ticket Opened", C_BLUE, icon="🎫",
+            thumbnail=interaction.user.display_avatar.url,
+            fields=[("👤  User",    f"{interaction.user.mention} `{interaction.user.id}`", True),
+                    ("📂  Channel", ch.mention,                                             True),
+                    ("🔢  Number",  f"#{num:04d}",                                         True)]
+        ))
 
-class TicketCloseButton(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+class TicketCloseView(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
 
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger, emoji="🔒", custom_id="ticket_close")
+    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.danger,
+                       emoji="🔒", custom_id="tsr_ticket_close_v3")
     async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.manage_channels:
-            return await interaction.response.send_message(embed=no_perm("Manage Channels"), ephemeral=True)
-        await interaction.response.send_message(embed=embed_info("Closing...", "This ticket will be deleted in 5 seconds."))
-        await asyncio.sleep(5)
-        await interaction.channel.delete(reason=f"Ticket closed by {interaction.user}")
+            return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+        await interaction.response.defer()
+        await _close_ticket(interaction.channel, interaction.user, interaction.guild)
+
+async def _close_ticket(channel: discord.TextChannel, closer, guild: discord.Guild, reason: str = "Resolved"):
+    cfg = gcfg(guild.id)
+    msgs = []
+    async for m in channel.history(limit=1000, oldest_first=True):
+        ts = m.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        content = m.content
+        if not content and m.embeds: content = m.embeds[0].description or "(embed)"
+        msgs.append(f"[{ts}] {m.author}: {content or '(no content)'}")
+    transcript_file = discord.File(
+        io.BytesIO("\n".join(msgs).encode()),
+        filename=f"transcript-{channel.name}.txt"
+    )
+    tc_id = cfg.get("ticket_transcript_channel") or cfg.get("log_channel")
+    if tc_id:
+        tc = guild.get_channel(int(tc_id))
+        if tc:
+            le = discord.Embed(
+                title="📋  Ticket Transcript",
+                description=(f"**Channel:** `#{channel.name}`\n"
+                             f"**Closed by:** {closer.mention}\n"
+                             f"**Reason:** {reason}"),
+                color=C_PURPLE
+            )
+            le.timestamp = now_utc()
+            le.set_footer(text="TSR Ticket System")
+            await tc.send(embed=le, file=transcript_file)
+    await channel.send(embed=_e_info("🔒  Closing Ticket",
+                                     f"Reason: **{reason}**\nDeleting in 5 seconds…", color=C_RED))
+    await asyncio.sleep(5)
+    try: await channel.delete(reason=f"Ticket closed: {reason}")
+    except Exception: pass
 
 @bot.tree.command(name="setuptickets", description="Set up the ticket system")
-@app_commands.describe(channel="Channel to send ticket panel in", category="Category for ticket channels",
-                        support_role="Role that can see tickets", message="Ticket panel message")
+@app_commands.describe(channel="Ticket panel channel", category="Category for ticket channels",
+                        support_role="Role that sees tickets",
+                        transcript_channel="Channel for transcripts",
+                        message="Panel message")
 @app_commands.default_permissions(administrator=True)
 async def setuptickets(interaction: discord.Interaction,
-                        channel: discord.TextChannel,
-                        category: discord.CategoryChannel = None,
+                        channel: discord.TextChannel, category: discord.CategoryChannel = None,
                         support_role: discord.Role = None,
+                        transcript_channel: discord.TextChannel = None,
                         message: str = None):
     cfg = gcfg(interaction.guild.id)
-    cfg["ticket_channel"]      = str(channel.id)
-    cfg["ticket_category"]     = str(category.id) if category else None
-    cfg["ticket_support_role"] = str(support_role.id) if support_role else None
-    if message:
-        cfg["ticket_message"] = message
+    cfg["ticket_channel"]            = str(channel.id)
+    cfg["ticket_category"]           = str(category.id) if category else None
+    cfg["ticket_support_role"]       = str(support_role.id) if support_role else None
+    cfg["ticket_transcript_channel"] = str(transcript_channel.id) if transcript_channel else None
+    if message: cfg["ticket_message"] = message
     save_cfg()
-
-    e = discord.Embed(title="🎫 Support Tickets",
-                      description=cfg["ticket_message"], color=C_BLUE)
-    e.set_footer(text=interaction.guild.name)
+    e = discord.Embed(title="🎫  Support Tickets", description=cfg["ticket_message"], color=C_BLUE)
+    e.set_footer(text=f"{interaction.guild.name}  •  Support")
+    e.timestamp = now_utc()
     await channel.send(embed=e, view=TicketButton())
-    await interaction.response.send_message(embed=embed_success("Tickets Set Up", f"Ticket panel sent to {channel.mention}."))
+    res = _e_success("Tickets Configured", f"Panel sent to {channel.mention}.")
+    res.add_field(name="Support Role",        value=support_role.mention if support_role else "None", inline=True)
+    res.add_field(name="Transcript Channel",  value=transcript_channel.mention if transcript_channel else "Uses log channel", inline=True)
+    await interaction.response.send_message(embed=res)
 
-# ── /setupautomod ─────────────────────────────────────────────
-@bot.tree.command(name="setupautomod", description="Configure AutoMod filters")
-@app_commands.describe(
-    links="Block links for non-mods (true/false)",
-    caps="Block excessive caps (true/false)",
-    caps_percent="Caps % threshold (default 80)",
-    caps_min_length="Minimum message length to check caps (default 10)",
-    exempt_role="Role exempt from all automod filters (toggles on/off)"
-)
+@bot.tree.command(name="closeticket", description="Close the current ticket")
+@app_commands.describe(reason="Reason for closing")
+@app_commands.default_permissions(manage_channels=True)
+async def closeticket(interaction: discord.Interaction, reason: str = "Resolved by staff"):
+    if not interaction.channel.name.startswith("ticket-"):
+        return await interaction.response.send_message(embed=_e_error("Not a Ticket","Run inside a ticket channel."), ephemeral=True)
+    await interaction.response.defer()
+    await _close_ticket(interaction.channel, interaction.user, interaction.guild, reason)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MOD MAIL COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="setupmodmail", description="Set up the ModMail system")
+@app_commands.describe(channel="Channel to create modmail threads in",
+                        category="Category for threads (optional)",
+                        log_channel="Log channel (optional)")
 @app_commands.default_permissions(administrator=True)
-async def setupautomod(interaction: discord.Interaction,
-                        links: bool = None,
-                        caps: bool = None,
-                        caps_percent: int = None,
-                        caps_min_length: int = None,
-                        exempt_role: discord.Role = None):
+async def setupmodmail(interaction: discord.Interaction,
+                        channel: discord.TextChannel,
+                        category: discord.CategoryChannel = None,
+                        log_channel: discord.TextChannel = None):
     cfg = gcfg(interaction.guild.id)
-    changes = []
-    if links is not None:
-        cfg["automod_links"] = links
-        changes.append(f"Anti-Links: `{'ON' if links else 'OFF'}`")
-    if caps is not None:
-        cfg["automod_caps"] = caps
-        changes.append(f"Anti-Caps: `{'ON' if caps else 'OFF'}`")
-    if caps_percent is not None:
-        cfg["automod_caps_pct"] = caps_percent
-        changes.append(f"Caps Threshold: `{caps_percent}%`")
-    if caps_min_length is not None:
-        cfg["automod_caps_min"] = caps_min_length
-        changes.append(f"Caps Min Length: `{caps_min_length}`")
-    if exempt_role:
-        rid = str(exempt_role.id)
-        if rid in cfg["automod_exempt_roles"]:
-            cfg["automod_exempt_roles"].remove(rid)
-            changes.append(f"Removed exempt role: {exempt_role.mention}")
-        else:
-            cfg["automod_exempt_roles"].append(rid)
-            changes.append(f"Added exempt role: {exempt_role.mention}")
+    cfg["modmail_channel"]     = str(channel.id)
+    cfg["modmail_category"]    = str(category.id) if category else None
+    cfg["modmail_log_channel"] = str(log_channel.id) if log_channel else None
     save_cfg()
-
-    e = embed_success("AutoMod Updated", "\n".join(changes) if changes else "No changes made.")
-    e.add_field(name="Current Settings",
-                value=(f"Anti-Links: `{'ON' if cfg['automod_links'] else 'OFF'}`\n"
-                       f"Anti-Caps: `{'ON' if cfg['automod_caps'] else 'OFF'}` ({cfg['automod_caps_pct']}% / min {cfg['automod_caps_min']} chars)\n"
-                       f"Bad Words: `{len(cfg['automod_badwords'])} words`\n"
-                       f"Exempt Roles: {len(cfg['automod_exempt_roles'])}"), inline=False)
+    e = _e_success("ModMail Configured",
+                   f"Users can DM {bot.user.mention} to contact staff.\n\n"
+                   f"**Thread channel:** {channel.mention}\n"
+                   f"**Log channel:** {log_channel.mention if log_channel else 'None'}")
+    e.add_field(name="How it works", value=(
+        "• Member DMs the bot → private thread created\n"
+        "• Staff reply in thread → user receives as DM\n"
+        "• `/mmclose` — archive and close thread"
+    ), inline=False)
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="badword", description="Add or remove a word from the filter list")
-@app_commands.describe(word="Word to add/remove", action="add or remove")
-@app_commands.default_permissions(administrator=True)
-async def badword(interaction: discord.Interaction, word: str, action: str = "add"):
+@bot.tree.command(name="mmclose", description="Close and archive a ModMail thread")
+@app_commands.describe(reason="Reason for closing")
+@app_commands.default_permissions(manage_channels=True)
+async def mmclose(interaction: discord.Interaction, reason: str = "Resolved"):
+    ch_id = str(interaction.channel.id)
+    uid   = next((u for u, t in modmail_db.items() if t == ch_id), None)
+    if uid is None:
+        return await interaction.response.send_message(embed=_e_error("Not a ModMail Thread","Use in an active modmail thread."), ephemeral=True)
+    await interaction.response.defer()
     cfg = gcfg(interaction.guild.id)
-    word = word.lower()
-    if action == "add":
-        if word not in cfg["automod_badwords"]:
-            cfg["automod_badwords"].append(word)
-            save_cfg()
-        await interaction.response.send_message(embed=embed_success("Word Added", f"`{word}` added to filter."), ephemeral=True)
-    elif action == "remove":
-        if word in cfg["automod_badwords"]:
-            cfg["automod_badwords"].remove(word)
-            save_cfg()
-        await interaction.response.send_message(embed=embed_success("Word Removed", f"`{word}` removed from filter."), ephemeral=True)
-    else:
-        await interaction.response.send_message(embed=embed_error("Invalid Action", "Use `add` or `remove`."), ephemeral=True)
+    msgs = []
+    async for m in interaction.channel.history(limit=500, oldest_first=True):
+        ts = m.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+        content = m.content or (m.embeds[0].description if m.embeds else "(embed)")
+        msgs.append(f"[{ts}] {m.author}: {content}")
+    tf = discord.File(io.BytesIO("\n".join(msgs).encode()), filename=f"modmail-{uid}.txt")
+    log_ch_id = cfg.get("modmail_log_channel") or cfg.get("log_channel")
+    if log_ch_id:
+        lc = interaction.guild.get_channel(int(log_ch_id))
+        if lc:
+            le = discord.Embed(
+                title="📋  ModMail Transcript",
+                description=(f"**User:** <@{uid}> (`{uid}`)\n"
+                             f"**Closed by:** {interaction.user.mention}\n"
+                             f"**Reason:** {reason}"),
+                color=C_PURPLE
+            )
+            le.timestamp = now_utc()
+            le.set_footer(text="TSR ModMail System")
+            await lc.send(embed=le, file=tf)
+    try:
+        user = await bot.fetch_user(int(uid))
+        close_e = discord.Embed(
+            title="📨  Thread Closed",
+            description=(f"Your modmail in **{interaction.guild.name}** has been closed.\n"
+                         f"**Reason:** {reason}\n\nOpen a new one by DMing the bot again."),
+            color=C_ORANGE
+        )
+        await user.send(embed=close_e)
+    except Exception: pass
+    del modmail_db[uid]; save_json("modmail.json", modmail_db)
+    await interaction.followup.send(embed=_e_success("Thread Closed","Transcript sent."))
+    await asyncio.sleep(3)
+    try: await interaction.channel.delete(reason=f"ModMail closed: {reason}")
+    except Exception: pass
 
-@bot.tree.command(name="filterlist", description="View all filtered words")
-@app_commands.default_permissions(administrator=True)
-async def filterlist(interaction: discord.Interaction):
-    cfg = gcfg(interaction.guild.id)
-    words = cfg.get("automod_badwords", [])
-    if not words:
-        return await interaction.response.send_message(embed=embed_info("Filter List", "No words in the filter."), ephemeral=True)
-    await interaction.response.send_message(
-        embed=embed_info("🚫 Filter List", "```" + ", ".join(words) + "```"), ephemeral=True)
+@bot.tree.command(name="mmreply", description="Reply to a modmail user (slash command)")
+@app_commands.describe(message="Your reply")
+@app_commands.default_permissions(manage_channels=True)
+async def mmreply(interaction: discord.Interaction, message: str):
+    ch_id = str(interaction.channel.id)
+    uid   = next((u for u, t in modmail_db.items() if t == ch_id), None)
+    if uid is None:
+        return await interaction.response.send_message(embed=_e_error("Not a ModMail Thread",""), ephemeral=True)
+    try:
+        user = await bot.fetch_user(int(uid))
+        e = discord.Embed(title=f"📨  Reply from {interaction.guild.name} Staff",
+                          description=message, color=C_PURPLE)
+        e.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
+        e.set_footer(text="Reply to continue the conversation  •  TSR ModMail")
+        e.timestamp = now_utc()
+        await user.send(embed=e)
+        echo = discord.Embed(description=message, color=C_PURPLE)
+        echo.set_author(name=f"[STAFF] {interaction.user}", icon_url=interaction.user.display_avatar.url)
+        echo.timestamp = now_utc()
+        await interaction.channel.send(embed=echo)
+        await interaction.response.send_message(embed=_e_success("Reply Sent",""), ephemeral=True)
+    except discord.Forbidden:
+        await interaction.response.send_message(embed=_e_error("DMs Closed","User has DMs disabled."), ephemeral=True)
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                  MODERATION COMMANDS                     ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════════════════════════════════════════════════════════════
+#  MODERATION COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
 
-@bot.tree.command(name="ban", description="Ban a member from the server")
-@app_commands.describe(member="Member to ban", reason="Reason", delete_days="Days of messages to delete (0-7)")
+def _can_target(interaction: discord.Interaction, member: discord.Member) -> bool:
+    if member == interaction.user: return False
+    if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS: return False
+    return True
+
+@bot.tree.command(name="ban", description="Permanently ban a member")
+@app_commands.describe(member="Member to ban", reason="Reason", delete_days="Days of messages to delete")
 @app_commands.default_permissions(ban_members=True)
 async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = None, delete_days: int = 1):
-    if not interaction.user.guild_permissions.ban_members:
-        return await interaction.response.send_message(embed=no_perm("Ban Members"), ephemeral=True)
-    if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS:
-        return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
-    if member == interaction.user:
-        return await interaction.response.send_message(embed=embed_error("Invalid", "You cannot ban yourself."), ephemeral=True)
-    dm_e = discord.Embed(title=f"{E['ban']} Banned from {interaction.guild.name}", color=C_RED)
-    dm_e.add_field(name="Reason", value=reason or "No reason provided")
-    dm_e.set_footer(text="Contact an admin if you believe this is a mistake.")
-    await dm_member(member, dm_e)
-    await member.ban(reason=reason, delete_message_days=min(max(delete_days, 0), 7))
-    res_e = embed_success("Member Banned", f"{member.mention} has been permanently banned.")
-    res_e.add_field(name="User", value=f"`{member}`", inline=True)
-    res_e.add_field(name="Reason", value=reason or "No reason", inline=True)
-    await interaction.response.send_message(embed=res_e)
-    await send_log(interaction.guild, embed_mod("Member Banned", E["ban"], interaction.user, member, reason, C_RED,
-                                                {"Deleted Messages": f"{delete_days} day(s)"}))
+    if not has_cmd_perm(interaction, "ban"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not interaction.user.guild_permissions.ban_members: return await interaction.response.send_message(embed=_e_error("No Permission","You need Ban Members."), ephemeral=True)
+    if not _can_target(interaction, member): return await interaction.response.send_message(embed=_e_error("Role Hierarchy","You can't moderate that member."), ephemeral=True)
+    await dm_user(member, discord.Embed(title=f"🔨  Banned from {interaction.guild.name}",
+                                        description=f"**Reason:** {reason or 'No reason'}",
+                                        color=C_RED))
+    await member.ban(reason=reason, delete_message_days=min(max(delete_days,0),7))
+    e = _e_success("Member Banned", f"{member.mention} has been permanently banned.")
+    e.add_field(name="User",   value=f"`{member}`",         inline=True)
+    e.add_field(name="Reason", value=reason or "No reason", inline=True)
+    await interaction.response.send_message(embed=e)
+    await send_log(interaction.guild, _mod_embed("Member Banned","🔨",C_RED,interaction.user,member,reason,
+                                                  {"Deleted Messages":f"{delete_days}d"}))
 
-@bot.tree.command(name="hardban", description="Permanently ban a user — they will be re-banned if they try to rejoin")
-@app_commands.describe(member="Member to hardban", reason="Reason")
+@bot.tree.command(name="hardban", description="Hardban — user is re-banned if they rejoin")
 @app_commands.default_permissions(administrator=True)
 async def hardban(interaction: discord.Interaction, member: discord.Member, reason: str = None):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=no_perm("Administrator"), ephemeral=True)
-    if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS:
-        return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
-    gid = str(interaction.guild.id)
-    uid = str(member.id)
-    hardban_db.setdefault(gid, {})[uid] = {
-        "reason":    reason or "No reason provided",
-        "moderator": str(interaction.user),
-        "time":      datetime.datetime.utcnow().isoformat()
-    }
+    if not has_cmd_perm(interaction, "hardban"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not _can_target(interaction, member): return await interaction.response.send_message(embed=_e_error("Role Hierarchy",""), ephemeral=True)
+    gid = str(interaction.guild.id); uid = str(member.id)
+    hardban_db.setdefault(gid,{})[uid] = {"reason": reason or "No reason", "moderator": str(interaction.user), "time": now_utc().isoformat()}
     save_json("hardbans.json", hardban_db)
-    dm_e = discord.Embed(title=f"{E['hardban']} You've been hardbanned from {interaction.guild.name}", color=C_RED)
-    dm_e.add_field(name="Reason", value=reason or "No reason provided")
-    dm_e.set_footer(text="This ban is permanent. You cannot rejoin this server.")
-    await dm_member(member, dm_e)
-    await member.ban(reason=f"HARDBAN: {reason or 'No reason'}", delete_message_days=7)
-    res_e = embed_success("Member Hardbanned", f"{member.mention} has been hardbanned. They will be re-banned if they attempt to rejoin.")
-    res_e.add_field(name="User", value=f"`{member}`", inline=True)
-    res_e.add_field(name="Reason", value=reason or "No reason", inline=True)
-    await interaction.response.send_message(embed=res_e)
-    await send_log(interaction.guild, embed_mod("💀 HARDBAN", E["hardban"], interaction.user, member, reason, C_RED))
+    await dm_user(member, discord.Embed(title=f"💀  Hardbanned from {interaction.guild.name}",
+                                         description=f"**Reason:** {reason or 'No reason'}\n*This ban is permanent.*", color=C_RED))
+    await member.ban(reason=f"HARDBAN: {reason}", delete_message_days=7)
+    await interaction.response.send_message(embed=_e_success("Hardbanned", f"{member.mention} has been hardbanned."))
+    await send_log(interaction.guild, _mod_embed("Hard Ban","💀",C_RED,interaction.user,member,reason))
 
-@bot.tree.command(name="hardban_id", description="Hardban a user by ID (they don't need to be in the server)")
-@app_commands.describe(user_id="User ID to hardban", reason="Reason")
+@bot.tree.command(name="hardban_id", description="Hardban by User ID (even if not in server)")
 @app_commands.default_permissions(administrator=True)
 async def hardban_id(interaction: discord.Interaction, user_id: str, reason: str = None):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=no_perm("Administrator"), ephemeral=True)
-    try:
-        user = await bot.fetch_user(int(user_id))
-    except (discord.NotFound, ValueError):
-        return await interaction.response.send_message(embed=embed_error("Not Found", "User not found."), ephemeral=True)
+    if not has_cmd_perm(interaction, "hardban_id"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    try: user = await bot.fetch_user(int(user_id))
+    except (discord.NotFound,ValueError): return await interaction.response.send_message(embed=_e_error("Not Found","User not found."), ephemeral=True)
     gid = str(interaction.guild.id)
-    hardban_db.setdefault(gid, {})[user_id] = {
-        "reason":    reason or "No reason",
-        "moderator": str(interaction.user),
-        "time":      datetime.datetime.utcnow().isoformat()
-    }
+    hardban_db.setdefault(gid,{})[user_id] = {"reason": reason or "No reason", "moderator": str(interaction.user), "time": now_utc().isoformat()}
     save_json("hardbans.json", hardban_db)
-    await interaction.guild.ban(user, reason=f"HARDBAN: {reason}", delete_message_days=7)
-    res_e = embed_success("User Hardbanned", f"**{user}** has been hardbanned.")
-    await interaction.response.send_message(embed=res_e)
-    await send_log(interaction.guild, embed_info(f"{E['hardban']} Hardban by ID",
-                                                  f"**{user}** (`{user.id}`) hardbanned by {interaction.user.mention}\n**Reason:** {reason}", color=C_RED))
+    try: await interaction.guild.ban(user, reason=f"HARDBAN: {reason or ''}", delete_message_days=0)
+    except Exception: pass
+    await interaction.response.send_message(embed=_e_success("Hardbanned", f"**{user}** (`{user.id}`) hardbanned."))
 
-@bot.tree.command(name="unhardban", description="Remove a hardban so the user can rejoin")
-@app_commands.describe(user_id="User ID to unhardban")
+@bot.tree.command(name="unhardban", description="Remove a hardban")
 @app_commands.default_permissions(administrator=True)
 async def unhardban(interaction: discord.Interaction, user_id: str):
     gid = str(interaction.guild.id)
-    if user_id not in hardban_db.get(gid, {}):
-        return await interaction.response.send_message(embed=embed_error("Not Hardbanned", "That user is not hardbanned."), ephemeral=True)
-    del hardban_db[gid][user_id]
+    if hardban_db.get(gid,{}).pop(user_id,None) is None:
+        return await interaction.response.send_message(embed=_e_error("Not Hardbanned","User not hardbanned."), ephemeral=True)
     save_json("hardbans.json", hardban_db)
-    try:
-        user = await bot.fetch_user(int(user_id))
-        await interaction.guild.unban(user, reason=f"Hardban removed by {interaction.user}")
-        name = str(user)
-    except Exception:
-        name = user_id
-    await interaction.response.send_message(embed=embed_success("Hardban Removed", f"**{name}** can now rejoin the server."))
+    try: user = await bot.fetch_user(int(user_id)); await interaction.guild.unban(user, reason="Hardban removed")
+    except Exception: pass
+    await interaction.response.send_message(embed=_e_success("Hardban Removed", f"User `{user_id}` un-hardbanned."))
 
-@bot.tree.command(name="hardbans", description="List all hardbanned users in this server")
+@bot.tree.command(name="hardbans", description="List all hardbanned users")
 @app_commands.default_permissions(administrator=True)
-async def hardbans_list(interaction: discord.Interaction):
-    gid = str(interaction.guild.id)
-    bans = hardban_db.get(gid, {})
-    if not bans:
-        return await interaction.response.send_message(embed=embed_info("Hardbans", "No users are hardbanned."), ephemeral=True)
-    e = embed_info(f"{E['hardban']} Hardbanned Users ({len(bans)})", color=C_RED)
-    for uid, data in list(bans.items())[:25]:
-        e.add_field(name=f"ID: {uid}", value=f"**Reason:** {data['reason']}\n**By:** {data['moderator']}", inline=True)
+async def hardbans(interaction: discord.Interaction):
+    gid = str(interaction.guild.id); hbs = hardban_db.get(gid,{})
+    if not hbs: return await interaction.response.send_message(embed=_e_info("No Hardbans","None."), ephemeral=True)
+    e = discord.Embed(title=f"💀  Hardbanned Users ({len(hbs)})", color=C_RED)
+    lines = [f"`{uid}` — {d.get('reason','?')} — by {d.get('moderator','?')}" for uid,d in list(hbs.items())[:20]]
+    e.description = "\n".join(lines)
     await interaction.response.send_message(embed=e, ephemeral=True)
 
-@bot.tree.command(name="softban", description="Ban then immediately unban to delete their messages")
-@app_commands.describe(member="Member to softban", delete_days="Days of messages to delete (default 7)", reason="Reason")
+@bot.tree.command(name="softban", description="Ban then immediately unban (clears messages)")
 @app_commands.default_permissions(ban_members=True)
-async def softban(interaction: discord.Interaction, member: discord.Member, delete_days: int = 7, reason: str = None):
-    if not interaction.user.guild_permissions.ban_members:
-        return await interaction.response.send_message(embed=no_perm("Ban Members"), ephemeral=True)
-    if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS:
-        return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
-    dm_e = discord.Embed(title=f"{E['softban']} Softbanned from {interaction.guild.name}", color=C_ORANGE)
-    dm_e.add_field(name="Reason", value=reason or "No reason")
-    dm_e.set_footer(text="You may rejoin with a valid invite.")
-    await dm_member(member, dm_e)
-    await member.ban(reason=f"Softban: {reason}", delete_message_days=min(delete_days, 7))
-    await interaction.guild.unban(member, reason="Softban: auto-unban")
-    await interaction.response.send_message(embed=embed_success("Member Softbanned", f"{member.mention} was softbanned. Their messages ({delete_days}d) were deleted. They may rejoin."))
-    await send_log(interaction.guild, embed_mod("Member Softbanned", E["softban"], interaction.user, member, reason, C_ORANGE))
+async def softban(interaction: discord.Interaction, member: discord.Member, reason: str = None, delete_days: int = 7):
+    if not has_cmd_perm(interaction, "softban"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not _can_target(interaction, member): return await interaction.response.send_message(embed=_e_error("Role Hierarchy",""), ephemeral=True)
+    await dm_user(member, discord.Embed(title=f"🧹  Softbanned from {interaction.guild.name}",
+                                         description=f"**Reason:** {reason or 'No reason'}\n*You may rejoin with a valid invite.*", color=C_ORANGE))
+    await member.ban(reason=f"Softban: {reason}", delete_message_days=min(max(delete_days,1),7))
+    await interaction.guild.unban(member, reason="Softban unban")
+    await interaction.response.send_message(embed=_e_success("Member Softbanned",f"{member.mention} softbanned (messages cleared)."))
+    await send_log(interaction.guild, _mod_embed("Soft Ban","🧹",C_ORANGE,interaction.user,member,reason))
 
-@bot.tree.command(name="tempban", description="Temporarily ban a member — auto-unbans after duration")
-@app_commands.describe(member="Member to tempban", duration="Duration e.g. 1h 1d 7d", reason="Reason")
+@bot.tree.command(name="tempban", description="Temporarily ban a member")
+@app_commands.describe(member="Member", duration="e.g. 1h 1d 7d", reason="Reason")
 @app_commands.default_permissions(ban_members=True)
 async def tempban(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = None):
-    if not interaction.user.guild_permissions.ban_members:
-        return await interaction.response.send_message(embed=no_perm("Ban Members"), ephemeral=True)
-    if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS:
-        return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
-    td = parse_duration(duration)
-    if not td:
-        return await interaction.response.send_message(embed=embed_error("Invalid Duration", "Use `10m`, `2h`, `7d` format."), ephemeral=True)
-    gid = str(interaction.guild.id)
-    uid = str(member.id)
-    expires = (datetime.datetime.utcnow() + td).timestamp()
-    tempban_db.setdefault(gid, {})[uid] = {"expires": expires, "reason": reason or "No reason"}
+    if not has_cmd_perm(interaction, "tempban"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not _can_target(interaction, member): return await interaction.response.send_message(embed=_e_error("Role Hierarchy",""), ephemeral=True)
+    td = parse_dur(duration)
+    if not td: return await interaction.response.send_message(embed=_e_error("Invalid Duration","Use `10m`,`2h`,`1d`."), ephemeral=True)
+    expires = (now_utc() + td).timestamp()
+    gid = str(interaction.guild.id); uid = str(member.id)
+    tempban_db.setdefault(gid,{})[uid] = {"expires": expires, "reason": reason or "No reason", "moderator": str(interaction.user)}
     save_json("tempbans.json", tempban_db)
-    dm_e = discord.Embed(title=f"⏳ Temporarily Banned from {interaction.guild.name}", color=C_ORANGE)
-    dm_e.add_field(name="Duration", value=duration_str(td))
-    dm_e.add_field(name="Reason",   value=reason or "No reason provided")
-    dm_e.set_footer(text="You will be automatically unbanned when the time is up.")
-    await dm_member(member, dm_e)
+    await dm_user(member, discord.Embed(title=f"⏳  Temp Banned from {interaction.guild.name}",
+                                         description=(f"**Duration:** {dur_str(td)}\n"
+                                                      f"**Expires:** <t:{int(expires)}:F>\n"
+                                                      f"**Reason:** {reason or 'No reason'}"),
+                                         color=C_ORANGE))
     await member.ban(reason=f"Tempban ({duration}): {reason}", delete_message_days=1)
-    res_e = embed_success("Member Tempbanned", f"{member.mention} banned for **{duration_str(td)}**.")
-    res_e.add_field(name="Expires", value=f"<t:{int(expires)}:R>", inline=True)
-    await interaction.response.send_message(embed=res_e)
-    await send_log(interaction.guild, embed_mod("Temp Ban", E["tempban"], interaction.user, member, reason, C_ORANGE,
-                                                {"Duration": duration_str(td), "Expires": f"<t:{int(expires)}:R>"}))
+    e = _e_success("Member Tempbanned", f"{member.mention} banned for **{dur_str(td)}**.")
+    e.add_field(name="Expires", value=f"<t:{int(expires)}:R>", inline=True)
+    await interaction.response.send_message(embed=e)
+    await send_log(interaction.guild, _mod_embed("Temp Ban","⏳",C_ORANGE,interaction.user,member,reason,
+                                                  {"Duration":dur_str(td),"Expires":f"<t:{int(expires)}:R>"}))
 
 @bot.tree.command(name="unban", description="Unban a user by their ID")
-@app_commands.describe(user_id="User ID to unban", reason="Reason")
 @app_commands.default_permissions(ban_members=True)
 async def unban(interaction: discord.Interaction, user_id: str, reason: str = None):
-    if not interaction.user.guild_permissions.ban_members:
-        return await interaction.response.send_message(embed=no_perm("Ban Members"), ephemeral=True)
+    if not has_cmd_perm(interaction, "unban"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     try:
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user, reason=reason)
-        # Remove from tempban if present
-        tempban_db.get(str(interaction.guild.id), {}).pop(user_id, None)
-        save_json("tempbans.json", tempban_db)
-        res_e = embed_success("Member Unbanned", f"**{user}** has been unbanned.")
-        res_e.add_field(name="Reason", value=reason or "No reason provided")
-        await interaction.response.send_message(embed=res_e)
-        await send_log(interaction.guild, embed_info(f"{E['unban']} Member Unbanned",
-                                                      f"**{user}** unbanned by {interaction.user.mention}", color=C_GREEN))
-    except (discord.NotFound, ValueError):
-        await interaction.response.send_message(embed=embed_error("Not Found", "User not found or not banned."), ephemeral=True)
+        tempban_db.get(str(interaction.guild.id),{}).pop(user_id,None); save_json("tempbans.json",tempban_db)
+        e = _e_success("Member Unbanned",f"**{user}** has been unbanned.")
+        e.add_field(name="Reason", value=reason or "No reason")
+        await interaction.response.send_message(embed=e)
+        await send_log(interaction.guild, _log_embed("Member Unbanned", C_GREEN, icon="🔓",
+            fields=[("👤  User", f"`{user}` `{user.id}`", True),
+                    ("🛡️  By",   interaction.user.mention, True),
+                    ("📝  Reason", reason or "No reason", True)]))
+    except (discord.NotFound,ValueError):
+        await interaction.response.send_message(embed=_e_error("Not Found","User not found or not banned."), ephemeral=True)
 
-@bot.tree.command(name="kick", description="Kick a member from the server")
-@app_commands.describe(member="Member to kick", reason="Reason")
+@bot.tree.command(name="kick", description="Kick a member")
 @app_commands.default_permissions(kick_members=True)
 async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = None):
-    if not interaction.user.guild_permissions.kick_members:
-        return await interaction.response.send_message(embed=no_perm("Kick Members"), ephemeral=True)
-    if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS:
-        return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
-    dm_e = discord.Embed(title=f"{E['kick']} Kicked from {interaction.guild.name}", color=C_ORANGE)
-    dm_e.add_field(name="Reason", value=reason or "No reason provided")
-    dm_e.set_footer(text="You may rejoin with a valid invite.")
-    await dm_member(member, dm_e)
+    if not has_cmd_perm(interaction, "kick"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not interaction.user.guild_permissions.kick_members: return await interaction.response.send_message(embed=_e_error("No Permission",""), ephemeral=True)
+    if not _can_target(interaction, member): return await interaction.response.send_message(embed=_e_error("Role Hierarchy",""), ephemeral=True)
+    await dm_user(member, discord.Embed(title=f"👢  Kicked from {interaction.guild.name}",
+                                         description=f"**Reason:** {reason or 'No reason'}\n*You may rejoin.*", color=C_ORANGE))
     await member.kick(reason=reason)
-    res_e = embed_success("Member Kicked", f"{member.mention} has been kicked.")
-    res_e.add_field(name="User", value=f"`{member}`", inline=True)
-    res_e.add_field(name="Reason", value=reason or "No reason", inline=True)
-    await interaction.response.send_message(embed=res_e)
-    await send_log(interaction.guild, embed_mod("Member Kicked", E["kick"], interaction.user, member, reason, C_ORANGE))
+    e = _e_success("Member Kicked", f"{member.mention} has been kicked.")
+    e.add_field(name="Reason", value=reason or "No reason")
+    await interaction.response.send_message(embed=e)
+    await send_log(interaction.guild, _mod_embed("Member Kicked","👢",C_ORANGE,interaction.user,member,reason))
+    # Anti-nuke kick tracking
+    async for entry in interaction.guild.audit_logs(limit=1, action=discord.AuditLogAction.kick):
+        if entry.target and entry.target.id == member.id:
+            await antinuke_check(interaction.guild, entry.user.id, "kick")
+            break
 
-@bot.tree.command(name="timeout", description="Timeout a member — e.g. 10m, 2h, 1d")
-@app_commands.describe(member="Member to timeout", duration="Duration e.g. 10m 2h 1d", reason="Reason")
+@bot.tree.command(name="timeout", description="Timeout a member  e.g. 10m 2h 1d")
 @app_commands.default_permissions(moderate_members=True)
 async def timeout_cmd(interaction: discord.Interaction, member: discord.Member, duration: str, reason: str = None):
-    if not interaction.user.guild_permissions.moderate_members:
-        return await interaction.response.send_message(embed=no_perm("Moderate Members"), ephemeral=True)
-    if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS:
-        return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
-    td = parse_duration(duration)
-    if not td:
-        return await interaction.response.send_message(embed=embed_error("Invalid Duration", "Use `10m`, `2h`, `1d` format."), ephemeral=True)
+    if not has_cmd_perm(interaction, "timeout"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not _can_target(interaction, member): return await interaction.response.send_message(embed=_e_error("Role Hierarchy",""), ephemeral=True)
+    td = parse_dur(duration)
+    if not td: return await interaction.response.send_message(embed=_e_error("Invalid Duration","Use `10m`,`2h`,`1d`."), ephemeral=True)
     await member.timeout(td, reason=reason)
-    res_e = embed_success("Member Timed Out", f"{member.mention} timed out for **{duration_str(td)}**.")
-    res_e.add_field(name="Duration", value=duration_str(td), inline=True)
-    res_e.add_field(name="Reason",   value=reason or "No reason", inline=True)
-    await interaction.response.send_message(embed=res_e)
-    dm_e = discord.Embed(title=f"{E['timeout']} Timed out in {interaction.guild.name}", color=C_YELLOW)
-    dm_e.add_field(name="Duration", value=duration_str(td))
-    dm_e.add_field(name="Reason",   value=reason or "No reason provided")
-    await dm_member(member, dm_e)
-    await send_log(interaction.guild, embed_mod("Member Timed Out", E["timeout"], interaction.user, member, reason, C_YELLOW,
-                                                {"Duration": duration_str(td)}))
+    e = _e_success("Member Timed Out", f"{member.mention} timed out for **{dur_str(td)}**.")
+    e.add_field(name="Duration", value=dur_str(td), inline=True)
+    e.add_field(name="Reason",   value=reason or "No reason", inline=True)
+    await interaction.response.send_message(embed=e)
+    await dm_user(member, discord.Embed(title=f"⏱️  Timed Out in {interaction.guild.name}",
+                                         description=f"**Duration:** {dur_str(td)}\n**Reason:** {reason or 'No reason'}",
+                                         color=C_YELLOW))
+    await send_log(interaction.guild, _mod_embed("Timeout","⏱️",C_YELLOW,interaction.user,member,reason,{"Duration":dur_str(td)}))
 
 @bot.tree.command(name="untimeout", description="Remove a member's timeout")
-@app_commands.describe(member="Member to untimeout", reason="Reason")
 @app_commands.default_permissions(moderate_members=True)
 async def untimeout(interaction: discord.Interaction, member: discord.Member, reason: str = None):
-    if not interaction.user.guild_permissions.moderate_members:
-        return await interaction.response.send_message(embed=no_perm("Moderate Members"), ephemeral=True)
+    if not has_cmd_perm(interaction, "untimeout"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await member.timeout(None, reason=reason)
-    await interaction.response.send_message(embed=embed_success("Timeout Removed", f"{member.mention}'s timeout has been removed."))
-    await send_log(interaction.guild, embed_mod("Timeout Removed", E["unlock"], interaction.user, member, reason, C_GREEN))
+    await interaction.response.send_message(embed=_e_success("Timeout Removed",f"{member.mention}'s timeout removed."))
+    await send_log(interaction.guild, _log_embed("Timeout Removed", C_GREEN, icon="🔓",
+        thumbnail=member.display_avatar.url,
+        fields=[("👤  User", f"{member.mention}", True), ("🛡️  By", interaction.user.mention, True)]))
 
-@bot.tree.command(name="warn", description="Warn a member")
-@app_commands.describe(member="Member to warn", reason="Reason")
+@bot.tree.command(name="warn", description="Issue a formal warning to a member")
 @app_commands.default_permissions(manage_messages=True)
 async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = None):
-    if not interaction.user.guild_permissions.manage_messages:
-        return await interaction.response.send_message(embed=no_perm("Manage Messages"), ephemeral=True)
+    if not has_cmd_perm(interaction, "warn"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     count = warn_user(str(interaction.guild.id), str(member.id), reason or "No reason", str(interaction.user))
-    dm_e = discord.Embed(title=f"{E['warn']} Warning in {interaction.guild.name}", color=C_YELLOW)
-    dm_e.add_field(name="Reason",         value=reason or "No reason")
-    dm_e.add_field(name="Total Warnings", value=str(count))
-    dm_e.set_footer(text="Please follow the server rules.")
-    await dm_member(member, dm_e)
-    res_e = embed_success("Member Warned", f"{member.mention} warned. They now have **{count}** warning(s).")
-    res_e.add_field(name="Reason", value=reason or "No reason")
-    await interaction.response.send_message(embed=res_e)
-    await send_log(interaction.guild, embed_mod("Member Warned", E["warn"], interaction.user, member, reason, C_YELLOW,
-                                                {"Total Warnings": str(count)}))
+    await dm_user(member, discord.Embed(title=f"⚠️  Warning in {interaction.guild.name}",
+                                         description=f"**Reason:** {reason or 'No reason'}\n**Total warnings:** {count}",
+                                         color=C_YELLOW))
+    e = _e_success("Warning Issued", f"{member.mention} warned. They now have **{count}** warning(s).")
+    e.add_field(name="Reason", value=reason or "No reason")
+    await interaction.response.send_message(embed=e)
+    await send_log(interaction.guild, _mod_embed("Warning Issued","⚠️",C_YELLOW,interaction.user,member,reason,{"Total":str(count)}))
 
 @bot.tree.command(name="warnings", description="View warnings for a member")
-@app_commands.describe(member="Member to check")
 async def warnings_cmd(interaction: discord.Interaction, member: discord.Member):
-    guild_id = str(interaction.guild.id)
-    user_warns = warnings_db.get(guild_id, {}).get(str(member.id), [])
-    if not user_warns:
-        return await interaction.response.send_message(embed=embed_success("No Warnings", f"{member.mention} has no warnings."), ephemeral=True)
-    e = embed_info(f"{E['warn']} Warnings for {member}", color=C_YELLOW)
+    gid = str(interaction.guild.id); uid = str(member.id)
+    warns = warnings_db.get(gid,{}).get(uid,[])
+    if not warns: return await interaction.response.send_message(embed=_e_success("No Warnings",f"{member.mention} has no warnings."), ephemeral=True)
+    e = discord.Embed(title=f"⚠️  Warnings for {member}", color=C_YELLOW)
     e.set_thumbnail(url=member.display_avatar.url)
-    for i, w in enumerate(user_warns, 1):
-        e.add_field(name=f"Warning {i}", value=f"**Reason:** {w['reason']}\n**By:** {w['moderator']}\n**At:** {w['time']}", inline=False)
-    e.set_footer(text=f"Total: {len(user_warns)} warning(s)")
+    e.set_footer(text=f"Total: {len(warns)}")
+    for i, w in enumerate(warns,1):
+        e.add_field(name=f"#{i}",
+                    value=f"**Reason:** {w['reason']}\n**By:** {w['moderator']}\n**At:** {w['time']}",
+                    inline=False)
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="clearwarnings", description="Clear all warnings for a member")
-@app_commands.describe(member="Member to clear warnings for")
 @app_commands.default_permissions(manage_messages=True)
 async def clearwarnings(interaction: discord.Interaction, member: discord.Member):
-    if not interaction.user.guild_permissions.manage_messages:
-        return await interaction.response.send_message(embed=no_perm("Manage Messages"), ephemeral=True)
-    warnings_db.setdefault(str(interaction.guild.id), {})[str(member.id)] = []
+    if not has_cmd_perm(interaction, "clearwarnings"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    warnings_db.setdefault(str(interaction.guild.id),{})[str(member.id)] = []
     save_json("warnings.json", warnings_db)
-    await interaction.response.send_message(embed=embed_success("Warnings Cleared", f"All warnings cleared for {member.mention}."))
+    await interaction.response.send_message(embed=_e_success("Warnings Cleared",f"All warnings cleared for {member.mention}."))
 
 @bot.tree.command(name="delwarn", description="Delete a specific warning by number")
-@app_commands.describe(member="Member", warning_number="Warning number to remove")
 @app_commands.default_permissions(manage_messages=True)
 async def delwarn(interaction: discord.Interaction, member: discord.Member, warning_number: int):
-    if not interaction.user.guild_permissions.manage_messages:
-        return await interaction.response.send_message(embed=no_perm("Manage Messages"), ephemeral=True)
-    gid = str(interaction.guild.id)
-    uid = str(member.id)
-    user_warns = warnings_db.get(gid, {}).get(uid, [])
-    if warning_number < 1 or warning_number > len(user_warns):
-        return await interaction.response.send_message(embed=embed_error("Invalid", f"Warning #{warning_number} does not exist."), ephemeral=True)
-    removed = user_warns.pop(warning_number - 1)
-    save_json("warnings.json", warnings_db)
-    await interaction.response.send_message(embed=embed_success("Warning Removed", f"Warning #{warning_number} removed from {member.mention}.\nReason was: `{removed['reason']}`"))
+    if not has_cmd_perm(interaction, "delwarn"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    gid = str(interaction.guild.id); uid = str(member.id)
+    w = warnings_db.get(gid,{}).get(uid,[])
+    if warning_number < 1 or warning_number > len(w):
+        return await interaction.response.send_message(embed=_e_error("Invalid","Warning not found."), ephemeral=True)
+    removed = w.pop(warning_number-1); save_json("warnings.json",warnings_db)
+    await interaction.response.send_message(embed=_e_success("Warning Removed",f"Warning #{warning_number} removed.\n**Was:** `{removed['reason']}`"))
 
 @bot.tree.command(name="purge", description="Delete messages from this channel")
-@app_commands.describe(amount="Number of messages (1–100)", member="Only delete from this member")
+@app_commands.describe(amount="1–100", member="Only delete from this member")
 @app_commands.default_permissions(manage_messages=True)
 async def purge(interaction: discord.Interaction, amount: int, member: discord.Member = None):
-    if not interaction.user.guild_permissions.manage_messages:
-        return await interaction.response.send_message(embed=no_perm("Manage Messages"), ephemeral=True)
-    if not 1 <= amount <= 100:
-        return await interaction.response.send_message(embed=embed_error("Invalid Amount", "Amount must be between 1 and 100."), ephemeral=True)
+    if not has_cmd_perm(interaction, "purge"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not 1 <= amount <= 100: return await interaction.response.send_message(embed=_e_error("Invalid","1–100 only."), ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     check = (lambda m: m.author == member) if member else None
     deleted = await interaction.channel.purge(limit=amount, check=check)
     target_str = f" from {member.mention}" if member else ""
-    await interaction.followup.send(embed=embed_success("Messages Purged", f"Deleted **{len(deleted)}** message(s){target_str}."), ephemeral=True)
-    log_e = embed_info(f"{E['purge']} Purge", f"**{len(deleted)}** messages purged in {interaction.channel.mention}{target_str} by {interaction.user.mention}", color=C_BLUE)
-    await send_log(interaction.guild, log_e)
+    await interaction.followup.send(embed=_e_success("Purged",f"Deleted **{len(deleted)}** message(s){target_str}."), ephemeral=True)
+    await send_log(interaction.guild, _log_embed("Messages Purged", C_BLUE, icon="🗑️",
+        fields=[("📂  Channel", interaction.channel.mention, True),
+                ("🛡️  By",      interaction.user.mention,    True),
+                ("🔢  Count",   str(len(deleted)),           True),
+                ("👤  Target",  member.mention if member else "Everyone", True)]))
 
-@bot.tree.command(name="slowmode", description="Set slowmode for this channel")
-@app_commands.describe(seconds="Seconds (0 to disable, max 21600)")
+@bot.tree.command(name="slowmode", description="Set channel slowmode")
+@app_commands.describe(seconds="0 to disable, max 21600")
 @app_commands.default_permissions(manage_channels=True)
 async def slowmode(interaction: discord.Interaction, seconds: int):
-    if not interaction.user.guild_permissions.manage_channels:
-        return await interaction.response.send_message(embed=no_perm("Manage Channels"), ephemeral=True)
-    if not 0 <= seconds <= 21600:
-        return await interaction.response.send_message(embed=embed_error("Invalid Value", "Must be 0–21600 seconds."), ephemeral=True)
+    if not has_cmd_perm(interaction, "slowmode"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not 0 <= seconds <= 21600: return await interaction.response.send_message(embed=_e_error("Invalid","0–21600."), ephemeral=True)
     await interaction.channel.edit(slowmode_delay=seconds)
     msg = f"Slowmode set to **{seconds}s**." if seconds else "Slowmode **disabled**."
-    await interaction.response.send_message(embed=embed_success("Slowmode Updated", msg))
+    await interaction.response.send_message(embed=_e_success("Slowmode Updated",msg))
+    await send_log(interaction.guild, _log_embed("Slowmode Changed", C_YELLOW, icon="🐢",
+        fields=[("📂  Channel", interaction.channel.mention, True),
+                ("⏱️  Delay",   f"{seconds}s",               True),
+                ("🛡️  By",      interaction.user.mention,    True)]))
 
-@bot.tree.command(name="lock", description="Lock the current channel")
-@app_commands.describe(reason="Reason for locking")
+@bot.tree.command(name="lock", description="Lock this channel")
 @app_commands.default_permissions(manage_channels=True)
 async def lock(interaction: discord.Interaction, reason: str = None):
-    if not interaction.user.guild_permissions.manage_channels:
-        return await interaction.response.send_message(embed=no_perm("Manage Channels"), ephemeral=True)
-    cfg   = gcfg(interaction.guild.id)
-    perm  = cfg.get("lock_deny_perm", "send_messages")
-    ch    = interaction.channel
-    # Deny @everyone
-    ow = ch.overwrites_for(interaction.guild.default_role)
-    if perm == "all":
-        ow.send_messages = False
-        ow.add_reactions = False
-        ow.use_application_commands = False
-    elif perm == "send_messages":
-        ow.send_messages = False
-    elif perm == "add_reactions":
-        ow.add_reactions = False
-    elif perm == "use_application_commands":
-        ow.use_application_commands = False
+    if not has_cmd_perm(interaction, "lock"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    cfg  = gcfg(interaction.guild.id); perm = cfg.get("lock_deny_perm","send_messages"); ch = interaction.channel
+    ow   = ch.overwrites_for(interaction.guild.default_role)
+    if perm in ("all","send_messages"):              ow.send_messages = False
+    if perm in ("all","add_reactions"):              ow.add_reactions = False
+    if perm in ("all","use_application_commands"):  ow.use_application_commands = False
     await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
-    # Allow exempt roles
-    for rid in cfg.get("lock_exempt_roles", []):
+    for rid in cfg.get("lock_exempt_roles",[]):
         role = interaction.guild.get_role(int(rid))
         if role:
-            role_ow = ch.overwrites_for(role)
-            if perm in ("all", "send_messages"):
-                role_ow.send_messages = True
-            if perm in ("all", "add_reactions"):
-                role_ow.add_reactions = True
-            if perm in ("all", "use_application_commands"):
-                role_ow.use_application_commands = True
-            await ch.set_permissions(role, overwrite=role_ow)
-    e = embed_info(f"{E['lock']} Channel Locked", f"**Reason:** {reason or 'No reason'}", color=C_RED)
-    e.add_field(name="Locked Permission", value=f"`{perm}`", inline=True)
-    exempt = [interaction.guild.get_role(int(r)) for r in cfg.get("lock_exempt_roles", []) if interaction.guild.get_role(int(r))]
-    if exempt:
-        e.add_field(name="Exempt Roles", value=" ".join(r.mention for r in exempt), inline=True)
+            row = ch.overwrites_for(role)
+            if perm in ("all","send_messages"):             row.send_messages = True
+            if perm in ("all","add_reactions"):             row.add_reactions = True
+            if perm in ("all","use_application_commands"): row.use_application_commands = True
+            await ch.set_permissions(role, overwrite=row)
+    e = discord.Embed(title="🔒  Channel Locked", description=f"**Reason:** {reason or 'No reason'}", color=C_RED)
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
-    await send_log(interaction.guild, embed_info(f"{E['lock']} Channel Locked",
-                                                  f"{interaction.channel.mention} locked by {interaction.user.mention}\n**Reason:** {reason}", color=C_RED))
+    await send_log(interaction.guild, _log_embed("Channel Locked", C_RED, icon="🔒",
+        fields=[("📂  Channel", ch.mention, True),("🛡️  By",interaction.user.mention,True),("📝  Reason",reason or "None",True)]))
 
-@bot.tree.command(name="unlock", description="Unlock the current channel")
+@bot.tree.command(name="unlock", description="Unlock this channel")
 @app_commands.default_permissions(manage_channels=True)
 async def unlock(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.manage_channels:
-        return await interaction.response.send_message(embed=no_perm("Manage Channels"), ephemeral=True)
-    cfg  = gcfg(interaction.guild.id)
-    perm = cfg.get("lock_deny_perm", "send_messages")
-    ow   = interaction.channel.overwrites_for(interaction.guild.default_role)
-    if perm in ("all", "send_messages"):
-        ow.send_messages = None
-    if perm in ("all", "add_reactions"):
-        ow.add_reactions = None
-    if perm in ("all", "use_application_commands"):
-        ow.use_application_commands = None
-    await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=ow)
-    await interaction.response.send_message(embed=embed_info(f"{E['unlock']} Channel Unlocked", "This channel is now open.", color=C_GREEN))
+    if not has_cmd_perm(interaction, "unlock"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    cfg  = gcfg(interaction.guild.id); perm = cfg.get("lock_deny_perm","send_messages"); ch = interaction.channel
+    ow   = ch.overwrites_for(interaction.guild.default_role)
+    if perm in ("all","send_messages"):             ow.send_messages = None
+    if perm in ("all","add_reactions"):             ow.add_reactions = None
+    if perm in ("all","use_application_commands"): ow.use_application_commands = None
+    await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
+    await interaction.response.send_message(embed=discord.Embed(title="🔓  Channel Unlocked",description="This channel is now open.",color=C_GREEN))
+    await send_log(interaction.guild, _log_embed("Channel Unlocked", C_GREEN, icon="🔓",
+        fields=[("📂  Channel", ch.mention, True),("🛡️  By",interaction.user.mention,True)]))
 
-@bot.tree.command(name="lockdown", description="Lock ALL channels (emergency)")
-@app_commands.describe(reason="Reason for lockdown")
+@bot.tree.command(name="lockdown", description="🚨 Lock ALL channels (emergency)")
 @app_commands.default_permissions(administrator=True)
 async def lockdown(interaction: discord.Interaction, reason: str = None):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=no_perm("Administrator"), ephemeral=True)
+    if not has_cmd_perm(interaction, "lockdown"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await interaction.response.defer()
     count = 0
     for ch in interaction.guild.text_channels:
         try:
-            ow = ch.overwrites_for(interaction.guild.default_role)
-            ow.send_messages = False
-            await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
-            count += 1
-        except Exception:
-            pass
-    await interaction.followup.send(embed=embed_info("🚨 SERVER LOCKDOWN",
-                                                       f"**{count}** channels locked.\n**Reason:** {reason or 'No reason'}\n**By:** {interaction.user.mention}", color=C_RED))
+            ow = ch.overwrites_for(interaction.guild.default_role); ow.send_messages = False
+            await ch.set_permissions(interaction.guild.default_role, overwrite=ow); count += 1
+        except Exception: pass
+    e = discord.Embed(title="🚨  SERVER LOCKDOWN ACTIVE",
+                      description=f"**{count}** channels locked.\n**Reason:** {reason or 'No reason'}\n**By:** {interaction.user.mention}",
+                      color=C_RED)
+    e.timestamp = now_utc()
+    await interaction.followup.send(embed=e)
+    await send_log(interaction.guild, _log_embed("SERVER LOCKDOWN", C_RED, icon="🚨",
+        fields=[("🛡️  By",interaction.user.mention,True),("🔢  Channels",str(count),True),
+                ("📝  Reason",reason or "No reason",True)]))
 
-@bot.tree.command(name="endlockdown", description="End server lockdown and unlock all channels")
+@bot.tree.command(name="endlockdown", description="End server lockdown")
 @app_commands.default_permissions(administrator=True)
 async def endlockdown(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=no_perm("Administrator"), ephemeral=True)
+    if not has_cmd_perm(interaction, "endlockdown"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await interaction.response.defer()
     count = 0
     for ch in interaction.guild.text_channels:
         try:
-            ow = ch.overwrites_for(interaction.guild.default_role)
-            ow.send_messages = None
-            await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
-            count += 1
-        except Exception:
-            pass
-    await interaction.followup.send(embed=embed_success("Lockdown Ended", f"**{count}** channels unlocked."))
+            ow = ch.overwrites_for(interaction.guild.default_role); ow.send_messages = None
+            await ch.set_permissions(interaction.guild.default_role, overwrite=ow); count += 1
+        except Exception: pass
+    await interaction.followup.send(embed=_e_success("Lockdown Ended",f"**{count}** channels unlocked."))
 
 @bot.tree.command(name="nick", description="Change a member's nickname")
-@app_commands.describe(member="Target member", nickname="New nickname (blank to reset)")
 @app_commands.default_permissions(manage_nicknames=True)
 async def nick(interaction: discord.Interaction, member: discord.Member, nickname: str = None):
-    if not interaction.user.guild_permissions.manage_nicknames:
-        return await interaction.response.send_message(embed=no_perm("Manage Nicknames"), ephemeral=True)
-    old = member.display_name
-    await member.edit(nick=nickname)
-    await interaction.response.send_message(embed=embed_success("Nickname Updated", f"**{old}** → **{nickname or member.name}**"))
+    if not has_cmd_perm(interaction, "nick"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    old = member.display_name; await member.edit(nick=nickname)
+    await interaction.response.send_message(embed=_e_success("Nickname Updated",f"`{old}` → `{nickname or member.name}`"))
 
 @bot.tree.command(name="role", description="Add or remove a role from a member")
-@app_commands.describe(member="Target member", role="Role to toggle")
 @app_commands.default_permissions(manage_roles=True)
 async def role_cmd(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
-    if not interaction.user.guild_permissions.manage_roles:
-        return await interaction.response.send_message(embed=no_perm("Manage Roles"), ephemeral=True)
-    if role >= interaction.guild.me.top_role:
-        return await interaction.response.send_message(embed=embed_error("Role Too High", "I can't manage that role."), ephemeral=True)
+    if not has_cmd_perm(interaction, "role"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if role >= interaction.guild.me.top_role: return await interaction.response.send_message(embed=_e_error("Role Too High","I can't manage that role."), ephemeral=True)
     if role in member.roles:
         await member.remove_roles(role)
-        await interaction.response.send_message(embed=embed_success("Role Removed", f"Removed {role.mention} from {member.mention}."))
+        await interaction.response.send_message(embed=_e_success("Role Removed",f"Removed {role.mention} from {member.mention}."))
     else:
         await member.add_roles(role)
-        await interaction.response.send_message(embed=embed_success("Role Added", f"Added {role.mention} to {member.mention}."))
+        await interaction.response.send_message(embed=_e_success("Role Added",f"Added {role.mention} to {member.mention}."))
 
 @bot.tree.command(name="massrole", description="Add or remove a role from ALL members")
-@app_commands.describe(role="Role to give/remove", action="add or remove")
 @app_commands.default_permissions(administrator=True)
 async def massrole(interaction: discord.Interaction, role: discord.Role, action: str = "add"):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(embed=no_perm("Administrator"), ephemeral=True)
+    if not has_cmd_perm(interaction, "massrole"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await interaction.response.defer()
     count = 0
-    for member in interaction.guild.members:
+    for m in interaction.guild.members:
         try:
-            if action == "add" and role not in member.roles:
-                await member.add_roles(role)
-                count += 1
-            elif action == "remove" and role in member.roles:
-                await member.remove_roles(role)
-                count += 1
-        except Exception:
-            pass
-    await interaction.followup.send(embed=embed_success("Mass Role", f"{'Added' if action == 'add' else 'Removed'} {role.mention} for/from **{count}** members."))
+            if action == "add" and role not in m.roles: await m.add_roles(role); count += 1
+            elif action == "remove" and role in m.roles: await m.remove_roles(role); count += 1
+        except Exception: pass
+    await interaction.followup.send(embed=_e_success("Mass Role",
+        f"{'Added' if action=='add' else 'Removed'} {role.mention} for **{count}** members."))
 
-@bot.tree.command(name="vcmute", description="Voice mute a member")
-@app_commands.describe(member="Member to mute", reason="Reason")
+@bot.tree.command(name="vcmute",   description="Voice mute a member")
 @app_commands.default_permissions(mute_members=True)
 async def vcmute(interaction: discord.Interaction, member: discord.Member, reason: str = None):
-    if not interaction.user.guild_permissions.mute_members:
-        return await interaction.response.send_message(embed=no_perm("Mute Members"), ephemeral=True)
+    if not has_cmd_perm(interaction, "vcmute"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await member.edit(mute=True, reason=reason)
-    await interaction.response.send_message(embed=embed_success("Voice Muted", f"{member.mention} has been voice muted."))
+    await interaction.response.send_message(embed=_e_success("Voice Muted",f"{member.mention} voice muted."))
 
-@bot.tree.command(name="vcunmute", description="Remove voice mute from a member")
-@app_commands.describe(member="Member to unmute")
+@bot.tree.command(name="vcunmute", description="Remove voice mute")
 @app_commands.default_permissions(mute_members=True)
 async def vcunmute(interaction: discord.Interaction, member: discord.Member):
-    if not interaction.user.guild_permissions.mute_members:
-        return await interaction.response.send_message(embed=no_perm("Mute Members"), ephemeral=True)
+    if not has_cmd_perm(interaction, "vcunmute"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await member.edit(mute=False)
-    await interaction.response.send_message(embed=embed_success("Voice Unmuted", f"{member.mention}'s voice mute has been removed."))
+    await interaction.response.send_message(embed=_e_success("Voice Unmuted",f"{member.mention} unmuted."))
 
 @bot.tree.command(name="deafen", description="Deafen a member in voice")
-@app_commands.describe(member="Member to deafen", reason="Reason")
 @app_commands.default_permissions(deafen_members=True)
 async def deafen(interaction: discord.Interaction, member: discord.Member, reason: str = None):
-    if not interaction.user.guild_permissions.deafen_members:
-        return await interaction.response.send_message(embed=no_perm("Deafen Members"), ephemeral=True)
+    if not has_cmd_perm(interaction, "deafen"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await member.edit(deafen=True, reason=reason)
-    await interaction.response.send_message(embed=embed_success("Member Deafened", f"{member.mention} has been deafened."))
+    await interaction.response.send_message(embed=_e_success("Deafened",f"{member.mention} deafened."))
 
 @bot.tree.command(name="undeafen", description="Undeafen a member")
-@app_commands.describe(member="Member to undeafen")
 @app_commands.default_permissions(deafen_members=True)
 async def undeafen(interaction: discord.Interaction, member: discord.Member):
-    if not interaction.user.guild_permissions.deafen_members:
-        return await interaction.response.send_message(embed=no_perm("Deafen Members"), ephemeral=True)
+    if not has_cmd_perm(interaction, "undeafen"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     await member.edit(deafen=False)
-    await interaction.response.send_message(embed=embed_success("Member Undeafened", f"{member.mention} can hear again."))
+    await interaction.response.send_message(embed=_e_success("Undeafened",f"{member.mention} undeafened."))
 
-@bot.tree.command(name="move", description="Move a member to a different voice channel")
-@app_commands.describe(member="Member to move", channel="Destination voice channel")
+@bot.tree.command(name="move", description="Move a member to another voice channel")
 @app_commands.default_permissions(move_members=True)
 async def move(interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
-    if not interaction.user.guild_permissions.move_members:
-        return await interaction.response.send_message(embed=no_perm("Move Members"), ephemeral=True)
-    if not member.voice:
-        return await interaction.response.send_message(embed=embed_error("Not in Voice", f"{member.mention} is not in a voice channel."), ephemeral=True)
+    if not has_cmd_perm(interaction, "move"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    if not member.voice: return await interaction.response.send_message(embed=_e_error("Not in Voice",""), ephemeral=True)
     await member.move_to(channel)
-    await interaction.response.send_message(embed=embed_success("Member Moved", f"{member.mention} moved to **{channel.name}**."))
+    await interaction.response.send_message(embed=_e_success("Moved",f"{member.mention} moved to **{channel.name}**."))
 
-@bot.tree.command(name="banlist", description="View all banned users in this server")
+@bot.tree.command(name="banlist", description="View banned users")
 @app_commands.default_permissions(ban_members=True)
 async def banlist(interaction: discord.Interaction):
-    if not interaction.user.guild_permissions.ban_members:
-        return await interaction.response.send_message(embed=no_perm("Ban Members"), ephemeral=True)
     await interaction.response.defer(ephemeral=True)
     bans = [entry async for entry in interaction.guild.bans()]
-    if not bans:
-        return await interaction.followup.send(embed=embed_info("Ban List", "No users are currently banned."), ephemeral=True)
-    e = embed_info(f"🔨 Ban List ({len(bans)} bans)", color=C_RED)
-    entries = "\n".join(f"`{b.user.id}` — **{b.user}** — {b.reason or 'No reason'}" for b in bans[:20])
-    e.description = entries
-    if len(bans) > 20:
-        e.set_footer(text=f"Showing 20 of {len(bans)} bans")
+    if not bans: return await interaction.followup.send(embed=_e_info("Ban List","No banned users."), ephemeral=True)
+    e = discord.Embed(title=f"🔨  Ban List ({len(bans)})", color=C_RED)
+    e.description = "\n".join(f"`{b.user.id}` — **{b.user}** — {b.reason or 'No reason'}" for b in bans[:20])
+    if len(bans) > 20: e.set_footer(text=f"Showing 20 of {len(bans)}")
     await interaction.followup.send(embed=e, ephemeral=True)
 
-# ╔══════════════════════════════════════════════════════════╗
-# ║                   UTILITY COMMANDS                       ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════════════════════════════════════════════════════════════
+#  GIVEAWAY SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════
 
-@bot.tree.command(name="userinfo", description="Get info about a user")
-@app_commands.describe(member="Member to look up")
-async def userinfo(interaction: discord.Interaction, member: discord.Member = None):
-    m = member or interaction.user
-    roles = [r.mention for r in reversed(m.roles) if r.name != "@everyone"]
-    badges = []
-    if m.public_flags.staff:           badges.append("👮 Discord Staff")
-    if m.public_flags.partner:         badges.append("🤝 Partner")
-    if m.public_flags.bug_hunter:      badges.append("🐛 Bug Hunter")
-    if m.public_flags.early_supporter: badges.append("⭐ Early Supporter")
-    if m.bot:                          badges.append("🤖 Bot")
-    warns = len(warnings_db.get(str(interaction.guild.id), {}).get(str(m.id), []))
+class GiveawayView(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+
+    @discord.ui.button(label="Enter Giveaway", style=discord.ButtonStyle.success,
+                       emoji="🎉", custom_id="tsr_giveaway_v3")
+    async def enter(self, interaction: discord.Interaction, button: discord.ui.Button):
+        msg_id = str(interaction.message.id); gid = str(interaction.guild.id)
+        ga = giveaway_db.get(gid,{}).get(msg_id)
+        if not ga or ga.get("ended"):
+            return await interaction.response.send_message(embed=_e_error("Giveaway Ended","This giveaway is no longer active."), ephemeral=True)
+        uid = str(interaction.user.id)
+        ga.setdefault("entries",[])
+        if uid in ga["entries"]:
+            ga["entries"].remove(uid); save_json("giveaways.json",giveaway_db)
+            return await interaction.response.send_message(embed=_e_info("Entry Removed","You've left the giveaway."), ephemeral=True)
+        ga["entries"].append(uid); save_json("giveaways.json",giveaway_db)
+        await interaction.response.send_message(embed=_e_success("Entered!",f"You're in! **{len(ga['entries'])}** total entries."), ephemeral=True)
+
+async def _pick_winners(ga, count, guild):
+    members = [guild.get_member(int(u)) for u in ga.get("entries",[]) if guild.get_member(int(u))]
+    return random.sample(members, min(count, len(members))) if members else []
+
+async def _end_giveaway(gid, msg_id, guild, channel, reroll=False):
+    ga = giveaway_db.get(gid,{}).get(msg_id)
+    if not ga or (ga.get("ended") and not reroll): return
+    ga["ended"] = True; save_json("giveaways.json",giveaway_db)
+    winners = await _pick_winners(ga, ga["winners"], guild)
+    if winners:
+        mentions = " ".join(w.mention for w in winners)
+        e = discord.Embed(title="🎉  Giveaway Ended — We Have a Winner!",
+                          description=f"**Prize:** {ga['prize']}\n**Winner(s):** {mentions}",
+                          color=C_GREEN)
+        e.set_footer(text="🎊  Congratulations!  •  TSR Giveaways")
+        e.timestamp = now_utc()
+        try: await channel.send(content=mentions, embed=e)
+        except Exception: pass
+    else:
+        try: await channel.send(embed=_e_error("No Winners","Nobody entered the giveaway."))
+        except Exception: pass
+
+@bot.tree.command(name="giveaway", description="Start a giveaway")
+@app_commands.describe(prize="Prize description", duration="e.g. 1h 24h 7d", winners="Number of winners")
+@app_commands.default_permissions(manage_guild=True)
+async def giveaway_cmd(interaction: discord.Interaction, prize: str, duration: str, winners: int = 1):
+    if not has_cmd_perm(interaction, "giveaway"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    td = parse_dur(duration)
+    if not td: return await interaction.response.send_message(embed=_e_error("Invalid Duration","Use `1h`,`1d`."), ephemeral=True)
+    ends = now_utc() + td
+    e = discord.Embed(title="🎉  GIVEAWAY!", color=C_PINK)
+    e.description = (f"**Prize:** {prize}\n\n"
+                     f"Press **Enter Giveaway** below to participate!\n"
+                     f"Clicking again removes your entry.")
+    e.add_field(name="⏰  Ends",    value=f"<t:{int(ends.timestamp())}:R>", inline=True)
+    e.add_field(name="🏆  Winners", value=str(winners),                     inline=True)
+    e.add_field(name="👤  Entries", value="0",                              inline=True)
+    e.set_footer(text=f"Hosted by {interaction.user}  •  TSR Giveaways")
+    e.timestamp = now_utc()
+    await interaction.response.send_message(embed=e, view=GiveawayView())
+    msg = await interaction.original_response()
     gid = str(interaction.guild.id)
-    is_hb = str(m.id) in hardban_db.get(gid, {})
-    e = discord.Embed(title=f"{E['user']} User Information", color=m.color if m.color.value else C_BLUE)
+    giveaway_db.setdefault(gid,{})[str(msg.id)] = {
+        "prize": prize, "winners": winners, "ends_at": ends.timestamp(),
+        "host_id": str(interaction.user.id), "channel": str(interaction.channel.id),
+        "entries": [], "ended": False,
+    }
+    save_json("giveaways.json",giveaway_db)
+    async def _end():
+        await asyncio.sleep(td.total_seconds())
+        await _end_giveaway(gid, str(msg.id), interaction.guild, interaction.channel)
+    bot.loop.create_task(_end())
+
+@bot.tree.command(name="greroll", description="Reroll a giveaway winner")
+@app_commands.describe(message_id="Message ID of the giveaway")
+@app_commands.default_permissions(manage_guild=True)
+async def greroll(interaction: discord.Interaction, message_id: str):
+    if not has_cmd_perm(interaction, "greroll"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    gid = str(interaction.guild.id); ga = giveaway_db.get(gid,{}).get(message_id)
+    if not ga: return await interaction.response.send_message(embed=_e_error("Not Found","Giveaway not found. Right-click the giveaway → Copy Message ID."), ephemeral=True)
+    await interaction.response.defer()
+    ch = interaction.guild.get_channel(int(ga["channel"]))
+    await _end_giveaway(gid, message_id, interaction.guild, ch, reroll=True)
+    await interaction.followup.send(embed=_e_success("Rerolled!","New winner(s) picked."))
+
+@bot.tree.command(name="gend", description="End a giveaway early")
+@app_commands.describe(message_id="Message ID of the giveaway")
+@app_commands.default_permissions(manage_guild=True)
+async def gend(interaction: discord.Interaction, message_id: str):
+    if not has_cmd_perm(interaction, "gend"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    gid = str(interaction.guild.id); ga = giveaway_db.get(gid,{}).get(message_id)
+    if not ga: return await interaction.response.send_message(embed=_e_error("Not Found","Giveaway not found."), ephemeral=True)
+    if ga.get("ended"): return await interaction.response.send_message(embed=_e_error("Already Ended",""), ephemeral=True)
+    await interaction.response.defer()
+    ch = interaction.guild.get_channel(int(ga["channel"]))
+    await _end_giveaway(gid, message_id, interaction.guild, ch)
+    await interaction.followup.send(embed=_e_success("Giveaway Ended","Winners picked."))
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SUGGESTION SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════
+
+class SuggestionVoteView(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+    @discord.ui.button(label="Upvote",   style=discord.ButtonStyle.success, emoji="👍", custom_id="tsr_suggest_up_v3")
+    async def upvote(self,   i: discord.Interaction, b): await _vote(i, "up")
+    @discord.ui.button(label="Downvote", style=discord.ButtonStyle.danger,  emoji="👎", custom_id="tsr_suggest_dn_v3")
+    async def downvote(self, i: discord.Interaction, b): await _vote(i, "down")
+
+async def _vote(interaction: discord.Interaction, vtype: str):
+    msg_id = str(interaction.message.id); gid = str(interaction.guild.id); uid = str(interaction.user.id)
+    suggestions_db.setdefault(gid,{}).setdefault(msg_id,{"up":[],"down":[]})
+    d = suggestions_db[gid][msg_id]; other = "down" if vtype=="up" else "up"
+    if uid in d[other]: d[other].remove(uid)
+    if uid in d[vtype]: d[vtype].remove(uid); action = "removed"
+    else: d[vtype].append(uid); action = "added"
+    save_json("suggestions.json",suggestions_db)
+    try:
+        emb = interaction.message.embeds[0]
+        new = []
+        for f in emb.fields:
+            if "👍" in f.name: new.append(("👍  Upvotes",   str(len(d["up"])),   True))
+            elif "👎" in f.name: new.append(("👎  Downvotes", str(len(d["down"])), True))
+            else: new.append((f.name, f.value, f.inline))
+        emb.clear_fields()
+        for n,v,i in new: emb.add_field(name=n,value=v,inline=i)
+        await interaction.message.edit(embed=emb)
+    except Exception: pass
+    await interaction.response.send_message(embed=_e_info("Vote Recorded",f"Your {vtype}vote has been {action}."), ephemeral=True)
+
+@bot.tree.command(name="suggest", description="Submit a suggestion")
+async def suggest(interaction: discord.Interaction, suggestion: str):
+    cfg = gcfg(interaction.guild.id); ch_id = cfg.get("suggestion_channel")
+    if not ch_id: return await interaction.response.send_message(embed=_e_error("Not Set Up","Ask an admin to use `/setupsuggestions`."), ephemeral=True)
+    ch = interaction.guild.get_channel(int(ch_id))
+    if not ch: return await interaction.response.send_message(embed=_e_error("Channel Missing",""), ephemeral=True)
+    e = discord.Embed(title="💡  New Suggestion", description=f"```{suggestion}```", color=C_YELLOW)
+    e.set_author(name=str(interaction.user), icon_url=interaction.user.display_avatar.url)
+    e.add_field(name="👍  Upvotes",   value="0", inline=True)
+    e.add_field(name="👎  Downvotes", value="0", inline=True)
+    e.set_footer(text=f"Submitted by {interaction.user}  •  UserID: {interaction.user.id}")
+    e.timestamp = now_utc()
+    msg = await ch.send(embed=e, view=SuggestionVoteView())
+    suggestions_db.setdefault(str(interaction.guild.id),{})[str(msg.id)] = {"up":[],"down":[]}
+    save_json("suggestions.json",suggestions_db)
+    await interaction.response.send_message(embed=_e_success("Suggestion Submitted",f"Posted in {ch.mention}."), ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AFK / REMIND / LEVELS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="afk", description="Set yourself as AFK")
+async def afk(interaction: discord.Interaction, reason: str = "AFK"):
+    gid = str(interaction.guild.id); uid = str(interaction.user.id)
+    afk_db.setdefault(gid,{})[uid] = {"reason": reason, "since": now_utc().timestamp()}
+    save_json("afk.json",afk_db)
+    try: await interaction.user.edit(nick=f"[AFK] {interaction.user.display_name[:28]}")
+    except Exception: pass
+    await interaction.response.send_message(embed=_e_success("AFK Set",f"You are now AFK.\n**Reason:** {reason}"))
+
+@bot.tree.command(name="remind", description="Set a reminder — bot will DM you")
+@app_commands.describe(duration="When to remind you e.g. 10m 2h 1d", message="Reminder message")
+async def remind(interaction: discord.Interaction, duration: str, message: str):
+    td = parse_dur(duration)
+    if not td: return await interaction.response.send_message(embed=_e_error("Invalid Duration","Use `10m`,`2h`,`1d`."), ephemeral=True)
+    remind_at = now_utc().timestamp() + td.total_seconds()
+    reminders_db.append({"user_id": interaction.user.id, "message": message, "remind_at": remind_at, "set_ago": dur_str(td)})
+    save_json("reminders.json",reminders_db)
+    e = _e_success("Reminder Set",f"I'll DM you in **{dur_str(td)}**.\n**Message:** {message}")
+    e.add_field(name="Reminds at", value=f"<t:{int(remind_at)}:F>", inline=True)
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+@bot.tree.command(name="rank", description="View your level and XP rank")
+async def rank(interaction: discord.Interaction, member: discord.Member = None):
+    m   = member or interaction.user; gid = str(interaction.guild.id)
+    d   = levels_db.get(gid,{}).get(str(m.id),{"xp":0,"level":0})
+    lvl = d["level"]; xp = d["xp"]; needed = xp_for_level(lvl+1)
+    all_u   = sorted(levels_db.get(gid,{}).items(), key=lambda x: x[1].get("xp",0), reverse=True)
+    rank_pos = next((i+1 for i,(uid,_) in enumerate(all_u) if uid==str(m.id)),"?")
+    # Progress bar
+    pct   = min(xp / needed, 1.0) if needed else 1.0
+    filled = int(pct * 20); bar = "█" * filled + "░" * (20 - filled)
+    e = discord.Embed(title=f"🏅  Rank Card — {m.display_name}", color=C_PINK)
     e.set_thumbnail(url=m.display_avatar.url)
-    e.set_author(name=str(m), icon_url=m.display_avatar.url)
-    e.add_field(name="🏷️ Username",       value=f"`{m}`",                                 inline=True)
-    e.add_field(name="🆔 User ID",         value=f"`{m.id}`",                              inline=True)
-    e.add_field(name="✏️ Nickname",        value=m.nick or "None",                         inline=True)
-    e.add_field(name="📅 Account Created", value=f"<t:{int(m.created_at.timestamp())}:R>", inline=True)
-    e.add_field(name="📥 Joined Server",   value=f"<t:{int(m.joined_at.timestamp())}:R>",  inline=True)
-    e.add_field(name="👑 Top Role",        value=m.top_role.mention,                       inline=True)
-    e.add_field(name=f"🎭 Roles ({len(roles)})", value=" ".join(roles[:10]) or "None",     inline=False)
-    if badges:
-        e.add_field(name="🏅 Badges", value="\n".join(badges), inline=False)
-    e.add_field(name="⚠️ Warnings", value=str(warns), inline=True)
-    if is_hb:
-        e.add_field(name="💀 Hardban", value="This user is hardbanned", inline=True)
+    e.description = f"```{bar}  {int(pct*100)}%```"
+    e.add_field(name="🏅  Level",    value=f"**{lvl}**",               inline=True)
+    e.add_field(name="✨  XP",       value=f"{xp:,} / {needed:,}",     inline=True)
+    e.add_field(name="📊  Rank",     value=f"**#{rank_pos}**",         inline=True)
     e.set_footer(text=f"Requested by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="serverinfo", description="Get info about the server")
+@bot.tree.command(name="leaderboard", description="Top XP leaderboard")
+async def leaderboard(interaction: discord.Interaction):
+    gid  = str(interaction.guild.id); all_d = levels_db.get(gid,{})
+    top  = sorted(all_d.items(), key=lambda x: x[1].get("xp",0), reverse=True)[:10]
+    if not top: return await interaction.response.send_message(embed=_e_info("Leaderboard","No data yet."), ephemeral=True)
+    medals = ["🥇","🥈","🥉"]
+    e = discord.Embed(title=f"📊  XP Leaderboard", color=C_GOLD)
+    e.set_author(name=interaction.guild.name, icon_url=interaction.guild.icon.url if interaction.guild.icon else None)
+    lines = []
+    for i,(uid,d) in enumerate(top):
+        medal  = medals[i] if i<3 else f"`#{i+1}`"
+        member = interaction.guild.get_member(int(uid))
+        name   = member.display_name if member else f"<@{uid}>"
+        lines.append(f"{medal}  **{name}**  —  Lvl {d.get('level',0)}  ·  {d.get('xp',0):,} XP")
+    e.description = "\n".join(lines)
+    e.set_footer(text=f"Requested by {interaction.user}")
+    e.timestamp = now_utc()
+    await interaction.response.send_message(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  UTILITY COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="userinfo", description="Get info about a member")
+async def userinfo(interaction: discord.Interaction, member: discord.Member = None):
+    m      = member or interaction.user
+    roles  = [r.mention for r in reversed(m.roles) if not r.is_default()]
+    flags  = []
+    if m.public_flags.staff:           flags.append("👮  Discord Staff")
+    if m.public_flags.partner:         flags.append("🤝  Partner")
+    if m.public_flags.bug_hunter:      flags.append("🐛  Bug Hunter")
+    if m.public_flags.early_supporter: flags.append("⭐  Early Supporter")
+    if m.public_flags.verified_phone:  flags.append("📱  Phone Verified")
+    if m.bot:                          flags.append("🤖  Bot")
+    gid    = str(interaction.guild.id)
+    warns  = len(warnings_db.get(gid,{}).get(str(m.id),[]))
+    is_hb  = str(m.id) in hardban_db.get(gid,{})
+    ld     = levels_db.get(gid,{}).get(str(m.id),{"xp":0,"level":0})
+    status = {"online":"🟢","idle":"🟡","dnd":"🔴","offline":"⚫"}.get(str(m.status),"⚫")
+    e = discord.Embed(color=m.color if m.color.value else C_BLUE)
+    e.set_author(name=f"{m}  •  User Info", icon_url=m.display_avatar.url)
+    e.set_thumbnail(url=m.display_avatar.url)
+    e.add_field(name="🏷️  Username",       value=f"`{m}`",                                  inline=True)
+    e.add_field(name="🆔  User ID",         value=f"`{m.id}`",                               inline=True)
+    e.add_field(name=f"{status}  Status",   value=str(m.status).title(),                     inline=True)
+    e.add_field(name="✏️  Nickname",        value=m.nick or "None",                          inline=True)
+    e.add_field(name="📅  Account Created", value=f"<t:{int(m.created_at.timestamp())}:R>",  inline=True)
+    e.add_field(name="📥  Joined Server",   value=f"<t:{int(m.joined_at.timestamp())}:R>",   inline=True)
+    e.add_field(name="👑  Top Role",        value=m.top_role.mention,                        inline=True)
+    e.add_field(name="🏅  Level",           value=f"Lvl {ld['level']} ({ld['xp']:,} XP)",   inline=True)
+    e.add_field(name="⚠️  Warnings",       value=str(warns),                                 inline=True)
+    if flags: e.add_field(name="🏅  Badges", value="\n".join(flags), inline=False)
+    e.add_field(name=f"🎭  Roles ({len(roles)})", value=" ".join(roles[:10]) or "None", inline=False)
+    if is_hb: e.add_field(name="💀  Hardbanned", value="⚠️  This user is hardbanned", inline=True)
+    e.set_footer(text=f"Requested by {interaction.user}")
+    e.timestamp = now_utc()
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="serverinfo", description="Get info about this server")
 async def serverinfo(interaction: discord.Interaction):
-    g = interaction.guild
-    bots   = sum(1 for m in g.members if m.bot)
+    g     = interaction.guild
+    bots  = sum(1 for m in g.members if m.bot)
     humans = g.member_count - bots
     online = sum(1 for m in g.members if m.status != discord.Status.offline and not m.bot)
-    e = discord.Embed(title=f"{E['server']} Server Information", color=C_BLUE)
-    if g.icon:
-        e.set_thumbnail(url=g.icon.url)
-    if g.banner:
-        e.set_image(url=g.banner.url)
-    e.set_author(name=g.name, icon_url=g.icon.url if g.icon else None)
-    e.add_field(name="🏠 Name",         value=g.name,                                                       inline=True)
-    e.add_field(name="🆔 ID",           value=f"`{g.id}`",                                                   inline=True)
-    e.add_field(name="👑 Owner",        value=g.owner.mention,                                               inline=True)
-    e.add_field(name="👥 Members",      value=f"👤 {humans} humans\n🤖 {bots} bots",                         inline=True)
-    e.add_field(name="🟢 Online",       value=str(online),                                                   inline=True)
-    e.add_field(name="💬 Channels",     value=f"💬 {len(g.text_channels)} text\n🔊 {len(g.voice_channels)} voice", inline=True)
-    e.add_field(name="🎭 Roles",        value=str(len(g.roles)),                                             inline=True)
-    e.add_field(name="😀 Emojis",       value=str(len(g.emojis)),                                            inline=True)
-    e.add_field(name="💎 Boosts",       value=f"Level {g.premium_tier} ({g.premium_subscription_count})",   inline=True)
-    e.add_field(name="📅 Created",      value=f"<t:{int(g.created_at.timestamp())}:R>",                     inline=True)
-    e.add_field(name="🔒 Verification", value=str(g.verification_level).title(),                            inline=True)
-    e.add_field(name="🌐 Region",       value="Automatic",                                                  inline=True)
+    e = discord.Embed(title=g.name, description=g.description or "*No description set*", color=C_BLURPLE)
+    if g.icon:   e.set_thumbnail(url=g.icon.url)
+    if g.banner: e.set_image(url=g.banner.url)
+    e.set_author(name="Server Information", icon_url=g.icon.url if g.icon else None)
+    e.add_field(name="🆔  Server ID",    value=f"`{g.id}`",                                  inline=True)
+    e.add_field(name="👑  Owner",         value=g.owner.mention,                              inline=True)
+    e.add_field(name="🌍  Region",        value=str(g.preferred_locale),                      inline=True)
+    e.add_field(name="👥  Members",       value=f"👤 {humans} humans\n🤖 {bots} bots",         inline=True)
+    e.add_field(name="🟢  Online",        value=str(online),                                  inline=True)
+    e.add_field(name="💬  Channels",      value=f"💬 {len(g.text_channels)} text  🔊 {len(g.voice_channels)} voice", inline=True)
+    e.add_field(name="🎭  Roles",         value=str(len(g.roles)),                            inline=True)
+    e.add_field(name="😀  Emojis",        value=str(len(g.emojis)),                           inline=True)
+    e.add_field(name="💎  Boost",         value=f"Level {g.premium_tier}  ({g.premium_subscription_count} boosts)", inline=True)
+    e.add_field(name="🔒  Verification",  value=str(g.verification_level).title(),            inline=True)
+    e.add_field(name="📅  Created",       value=f"<t:{int(g.created_at.timestamp())}:R>",     inline=True)
     e.set_footer(text=f"Requested by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="roleinfo", description="Get information about a role")
-@app_commands.describe(role="The role to inspect")
+@bot.tree.command(name="roleinfo", description="Get info about a role")
 async def roleinfo(interaction: discord.Interaction, role: discord.Role):
-    members_with_role = [m for m in interaction.guild.members if role in m.roles]
-    perms = [p.replace("_", " ").title() for p, v in role.permissions if v]
-    e = discord.Embed(title=f"🎭 Role Info — {role.name}", color=role.color)
-    e.add_field(name="🆔 ID",          value=f"`{role.id}`",                               inline=True)
-    e.add_field(name="🎨 Color",       value=str(role.color),                               inline=True)
-    e.add_field(name="👤 Members",     value=str(len(members_with_role)),                   inline=True)
-    e.add_field(name="📌 Position",    value=str(role.position),                            inline=True)
-    e.add_field(name="🤖 Managed",     value="Yes" if role.managed else "No",               inline=True)
-    e.add_field(name="📢 Mentionable", value="Yes" if role.mentionable else "No",           inline=True)
-    e.add_field(name="📅 Created",     value=f"<t:{int(role.created_at.timestamp())}:R>",  inline=True)
-    if perms:
-        e.add_field(name=f"🔑 Permissions ({len(perms)})", value=", ".join(perms[:15]) or "None", inline=False)
+    with_role = [m for m in interaction.guild.members if role in m.roles]
+    perms = [p.replace("_"," ").title() for p,v in role.permissions if v]
+    e = discord.Embed(title=f"  {role.name}", color=role.color)
+    e.set_author(name="Role Information")
+    e.add_field(name="🆔  ID",          value=f"`{role.id}`",                               inline=True)
+    e.add_field(name="🎨  Color",       value=str(role.color),                               inline=True)
+    e.add_field(name="👤  Members",     value=str(len(with_role)),                           inline=True)
+    e.add_field(name="📌  Position",    value=str(role.position),                            inline=True)
+    e.add_field(name="🤖  Managed",     value="Yes" if role.managed else "No",               inline=True)
+    e.add_field(name="📢  Mentionable", value="Yes" if role.mentionable else "No",           inline=True)
+    e.add_field(name="📅  Created",     value=f"<t:{int(role.created_at.timestamp())}:R>",  inline=True)
+    if perms: e.add_field(name=f"🔑  Permissions ({len(perms)})", value=", ".join(perms[:20]) or "None", inline=False)
     e.set_footer(text=f"Requested by {interaction.user}")
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="channelinfo", description="Get information about a channel")
-@app_commands.describe(channel="The channel to inspect")
+@bot.tree.command(name="channelinfo", description="Get info about a channel")
 async def channelinfo(interaction: discord.Interaction, channel: discord.TextChannel = None):
     ch = channel or interaction.channel
-    e = discord.Embed(title=f"💬 Channel Info — #{ch.name}", color=C_BLUE)
-    e.add_field(name="🆔 ID",         value=f"`{ch.id}`",                              inline=True)
-    e.add_field(name="📂 Category",   value=ch.category.name if ch.category else "None", inline=True)
-    e.add_field(name="📌 Position",   value=str(ch.position),                          inline=True)
-    e.add_field(name="🐢 Slowmode",   value=f"{ch.slowmode_delay}s",                   inline=True)
-    e.add_field(name="🔞 NSFW",       value="Yes" if ch.nsfw else "No",                inline=True)
-    e.add_field(name="📅 Created",    value=f"<t:{int(ch.created_at.timestamp())}:R>", inline=True)
-    if ch.topic:
-        e.add_field(name="📝 Topic", value=ch.topic[:256], inline=False)
+    e = discord.Embed(title=f"#{ch.name}", color=C_BLUE)
+    e.set_author(name="Channel Information")
+    e.add_field(name="🆔  ID",         value=f"`{ch.id}`",                              inline=True)
+    e.add_field(name="📂  Category",   value=ch.category.name if ch.category else "None", inline=True)
+    e.add_field(name="📌  Position",   value=str(ch.position),                          inline=True)
+    e.add_field(name="🐢  Slowmode",   value=f"{ch.slowmode_delay}s",                   inline=True)
+    e.add_field(name="🔞  NSFW",       value="Yes" if ch.nsfw else "No",                inline=True)
+    e.add_field(name="📅  Created",    value=f"<t:{int(ch.created_at.timestamp())}:R>", inline=True)
+    if ch.topic: e.add_field(name="📝  Topic", value=ch.topic[:200], inline=False)
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="avatar", description="Get a member's avatar")
-@app_commands.describe(member="Member to get avatar of")
 async def avatar(interaction: discord.Interaction, member: discord.Member = None):
     m = member or interaction.user
-    e = discord.Embed(title=f"{m.display_name}'s Avatar", color=C_BLUE)
+    e = discord.Embed(title=f"🖼️  {m.display_name}'s Avatar", color=C_BLUE)
     e.set_image(url=m.display_avatar.url)
-    e.add_field(name="🔗 Links", value=(
-        f"[PNG]({m.display_avatar.with_format('png').url}) | "
-        f"[JPG]({m.display_avatar.with_format('jpg').url}) | "
-        f"[WEBP]({m.display_avatar.with_format('webp').url})"
-    ))
+    e.add_field(name="🔗  Download",
+                value=f"[PNG]({m.display_avatar.with_format('png').url})  |  [JPG]({m.display_avatar.with_format('jpg').url})")
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="banner", description="Get a member's profile banner")
-@app_commands.describe(member="Member to get banner of")
 async def banner(interaction: discord.Interaction, member: discord.Member = None):
-    m = member or interaction.user
+    m    = member or interaction.user
     user = await bot.fetch_user(m.id)
     if not user.banner:
-        return await interaction.response.send_message(embed=embed_error("No Banner", f"{m.display_name} has no profile banner."), ephemeral=True)
-    e = discord.Embed(title=f"{m.display_name}'s Banner", color=C_BLUE)
+        return await interaction.response.send_message(embed=_e_error("No Banner",f"{m.display_name} has no banner."), ephemeral=True)
+    e = discord.Embed(title=f"🖼️  {m.display_name}'s Banner", color=C_BLUE)
     e.set_image(url=user.banner.url)
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="ping", description="Check bot latency")
 async def ping(interaction: discord.Interaction):
-    latency = round(bot.latency * 1000)
-    quality = "🟢 Excellent" if latency < 100 else "🟡 Good" if latency < 200 else "🔴 High"
-    e = embed_info(f"{E['ping']} Pong!", f"**Latency:** `{latency}ms`\n**Status:** {quality}", color=C_BLUE)
+    lat = round(bot.latency * 1000)
+    bar_pct = min(lat / 400, 1.0); filled = int(bar_pct * 20); bar = "▓" * filled + "░" * (20 - filled)
+    col = C_GREEN if lat < 100 else C_YELLOW if lat < 200 else C_RED
+    qual = "Excellent" if lat < 100 else "Good" if lat < 200 else "High"
+    e = discord.Embed(title="🏓  Pong!", color=col)
+    e.description = f"```{bar}```"
+    e.add_field(name="📡  API Latency", value=f"`{lat}ms`", inline=True)
+    e.add_field(name="📶  Quality",     value=qual,          inline=True)
+    e.set_footer(text="TSR Bot")
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="snipe", description="Show the last deleted message in this channel")
+@bot.tree.command(name="snipe", description="Show the last deleted message")
 async def snipe(interaction: discord.Interaction):
-    gid = str(interaction.guild.id)
-    data = snipe_db.get(gid)
-    if not data or data.get("channel") != interaction.channel.id:
-        return await interaction.response.send_message(embed=embed_error("Nothing to Snipe", "No recently deleted messages in this channel."), ephemeral=True)
-    e = discord.Embed(description=data["content"] or "(no text)", color=C_PURPLE)
-    e.set_author(name=data["author"], icon_url=data["avatar"])
-    e.set_footer(text=f"{E['snipe']} Sniped by {interaction.user}")
-    e.timestamp = datetime.datetime.fromtimestamp(data["time"], tz=datetime.timezone.utc)
+    gid = str(interaction.guild.id); d = snipe_db.get(gid)
+    if not d or d.get("channel") != interaction.channel.id:
+        return await interaction.response.send_message(embed=_e_error("Nothing to Snipe","No recently deleted messages."), ephemeral=True)
+    e = discord.Embed(description=d["content"] or "(no text)", color=C_PURPLE)
+    e.set_author(name=d["author"], icon_url=d["avatar"])
+    e.set_footer(text=f"👻  Sniped by {interaction.user}")
+    e.timestamp = datetime.datetime.fromtimestamp(d["time"], tz=datetime.timezone.utc)
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="editsnipe", description="Show the last edited message in this channel")
+@bot.tree.command(name="editsnipe", description="Show the last edited message")
 async def editsnipe(interaction: discord.Interaction):
-    gid = str(interaction.guild.id)
-    data = editsnipe_db.get(gid)
-    if not data or data.get("channel") != interaction.channel.id:
-        return await interaction.response.send_message(embed=embed_error("Nothing to Snipe", "No recently edited messages."), ephemeral=True)
+    gid = str(interaction.guild.id); d = editsnipe_db.get(gid)
+    if not d or d.get("channel") != interaction.channel.id:
+        return await interaction.response.send_message(embed=_e_error("Nothing to Snipe","No recently edited messages."), ephemeral=True)
     e = discord.Embed(color=C_YELLOW)
-    e.set_author(name=data["author"], icon_url=data["avatar"])
-    e.add_field(name="Before", value=data["before"][:500] or "(empty)", inline=False)
-    e.add_field(name="After",  value=data["after"][:500]  or "(empty)", inline=False)
-    e.add_field(name="🔗 Jump", value=f"[Go to message]({data['jump_url']})", inline=False)
-    e.set_footer(text=f"{E['snipe']} Edit-sniped by {interaction.user}")
-    e.timestamp = datetime.datetime.fromtimestamp(data["time"], tz=datetime.timezone.utc)
+    e.set_author(name=d["author"], icon_url=d["avatar"])
+    e.add_field(name="Before", value=d["before"][:500] or "(empty)", inline=False)
+    e.add_field(name="After",  value=d["after"][:500]  or "(empty)", inline=False)
+    e.add_field(name="🔗  Jump", value=f"[Go to message]({d['jump_url']})", inline=False)
+    e.set_footer(text=f"👻  Edit-sniped by {interaction.user}")
+    e.timestamp = datetime.datetime.fromtimestamp(d["time"], tz=datetime.timezone.utc)
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="say", description="Make the bot send a message")
-@app_commands.describe(message="Message content", channel="Channel to send to")
+@bot.tree.command(name="say", description="Make the bot say something")
 @app_commands.default_permissions(manage_messages=True)
 async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
-    if not interaction.user.guild_permissions.manage_messages:
-        return await interaction.response.send_message(embed=no_perm("Manage Messages"), ephemeral=True)
+    if not has_cmd_perm(interaction, "say"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     target = channel or interaction.channel
     await target.send(message)
-    await interaction.response.send_message(embed=embed_success("Message Sent", f"Sent to {target.mention}."), ephemeral=True)
+    await interaction.response.send_message(embed=_e_success("Sent",f"Message sent to {target.mention}."), ephemeral=True)
 
-@bot.tree.command(name="embed", description="Send a custom embed message")
-@app_commands.describe(title="Title", description="Description", color="Hex color (e.g. ff0000)", channel="Channel")
+@bot.tree.command(name="embed", description="Send a custom embed")
+@app_commands.describe(title="Title", description="Description",
+                        color="Hex color e.g. ff0000 (no #)", channel="Channel to send to")
 @app_commands.default_permissions(manage_messages=True)
-async def embed_cmd(interaction: discord.Interaction, title: str, description: str, color: str = "5865f2", channel: discord.TextChannel = None):
-    if not interaction.user.guild_permissions.manage_messages:
-        return await interaction.response.send_message(embed=no_perm("Manage Messages"), ephemeral=True)
-    try:
-        col = int(color.replace("#", ""), 16)
-    except Exception:
-        col = C_BLUE
+async def embed_cmd(interaction: discord.Interaction, title: str, description: str,
+                     color: str = "5865f2", channel: discord.TextChannel = None):
+    if not has_cmd_perm(interaction, "embed"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    try: col = int(color.replace("#",""),16)
+    except Exception: col = C_BLUE
     target = channel or interaction.channel
     e = discord.Embed(title=title, description=description, color=col)
-    e.set_footer(text=f"Sent by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    e.set_footer(text=f"Sent by {interaction.user}"); e.timestamp = now_utc()
     await target.send(embed=e)
-    await interaction.response.send_message(embed=embed_success("Embed Sent", f"Sent to {target.mention}."), ephemeral=True)
+    await interaction.response.send_message(embed=_e_success("Embed Sent",f"Sent to {target.mention}."), ephemeral=True)
+
+@bot.tree.command(name="announce", description="Send an announcement embed")
+@app_commands.default_permissions(manage_guild=True)
+async def announce(interaction: discord.Interaction, channel: discord.TextChannel,
+                    title: str, message: str, ping: discord.Role = None):
+    if not has_cmd_perm(interaction, "announce"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    e = discord.Embed(title=f"📢  {title}", description=message, color=C_BLUE)
+    e.set_footer(text=f"Announced by {interaction.user}"); e.timestamp = now_utc()
+    await channel.send(content=ping.mention if ping else None, embed=e)
+    await interaction.response.send_message(embed=_e_success("Announcement Sent",f"Sent to {channel.mention}."), ephemeral=True)
 
 @bot.tree.command(name="poll", description="Create a yes/no poll")
-@app_commands.describe(question="Poll question")
 async def poll(interaction: discord.Interaction, question: str):
-    e = discord.Embed(title="📊 Poll", description=f"**{question}**", color=C_PURPLE)
-    e.set_footer(text=f"Poll by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    e = discord.Embed(title="📊  Poll", description=f"**{question}**", color=C_PURPLE)
+    e.set_footer(text=f"Poll by {interaction.user}"); e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
     msg = await interaction.original_response()
-    await msg.add_reaction("✅")
-    await msg.add_reaction("❌")
+    await msg.add_reaction("✅"); await msg.add_reaction("❌")
 
-@bot.tree.command(name="multipoll", description="Create a poll with up to 5 custom options")
-@app_commands.describe(question="Poll question", options="Options separated by | e.g. Option A|Option B|Option C")
+@bot.tree.command(name="multipoll", description="Create a poll with up to 5 options")
+@app_commands.describe(question="Question", options="Options separated by |  e.g. Option A|Option B|Option C")
 async def multipoll(interaction: discord.Interaction, question: str, options: str):
     opts = [o.strip() for o in options.split("|")][:5]
-    if len(opts) < 2:
-        return await interaction.response.send_message(embed=embed_error("Invalid", "Provide at least 2 options separated by `|`."), ephemeral=True)
+    if len(opts) < 2: return await interaction.response.send_message(embed=_e_error("Invalid","At least 2 options."), ephemeral=True)
     emojis = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣"]
-    desc = f"**{question}**\n\n" + "\n".join(f"{emojis[i]} {o}" for i, o in enumerate(opts))
-    e = discord.Embed(title="📊 Poll", description=desc, color=C_PURPLE)
-    e.set_footer(text=f"Poll by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    desc = f"**{question}**\n\n" + "\n".join(f"{emojis[i]}  {o}" for i,o in enumerate(opts))
+    e = discord.Embed(title="📊  Multi-Poll", description=desc, color=C_PURPLE)
+    e.set_footer(text=f"Poll by {interaction.user}"); e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
     msg = await interaction.original_response()
-    for i in range(len(opts)):
-        await msg.add_reaction(emojis[i])
-
-@bot.tree.command(name="giveaway", description="Start a simple giveaway (ends after duration)")
-@app_commands.describe(prize="What to give away", duration="Duration e.g. 1h 1d", winners="Number of winners")
-@app_commands.default_permissions(manage_guild=True)
-async def giveaway(interaction: discord.Interaction, prize: str, duration: str, winners: int = 1):
-    if not interaction.user.guild_permissions.manage_guild:
-        return await interaction.response.send_message(embed=no_perm("Manage Guild"), ephemeral=True)
-    td = parse_duration(duration)
-    if not td:
-        return await interaction.response.send_message(embed=embed_error("Invalid Duration", "Use e.g. `1h`, `1d`."), ephemeral=True)
-    ends_at = datetime.datetime.utcnow() + td
-    e = discord.Embed(title="🎉 GIVEAWAY!", description=f"**Prize:** {prize}\n\nReact with 🎉 to enter!", color=C_PINK)
-    e.add_field(name="⏰ Ends",   value=f"<t:{int(ends_at.timestamp())}:R>", inline=True)
-    e.add_field(name="🏆 Winners", value=str(winners), inline=True)
-    e.set_footer(text=f"Hosted by {interaction.user}")
-    await interaction.response.send_message(embed=e)
-    msg = await interaction.original_response()
-    await msg.add_reaction("🎉")
-
-    await asyncio.sleep(td.total_seconds())
-    msg = await interaction.channel.fetch_message(msg.id)
-    reaction = discord.utils.get(msg.reactions, emoji="🎉")
-    if reaction:
-        users = [u async for u in reaction.users() if not u.bot]
-        if users:
-            win_list = random.sample(users, min(winners, len(users)))
-            win_mentions = " ".join(w.mention for w in win_list)
-            e2 = discord.Embed(title="🎉 Giveaway Ended!", description=f"**Prize:** {prize}\n**Winners:** {win_mentions}", color=C_GREEN)
-            await interaction.channel.send(content=win_mentions, embed=e2)
-        else:
-            await interaction.channel.send(embed=embed_error("No Winners", "Nobody entered the giveaway."))
-
-@bot.tree.command(name="announce", description="Send an announcement embed to a channel")
-@app_commands.describe(channel="Announcement channel", title="Title", message="Announcement text", ping="Role to ping (optional)")
-@app_commands.default_permissions(manage_guild=True)
-async def announce(interaction: discord.Interaction, channel: discord.TextChannel, title: str, message: str, ping: discord.Role = None):
-    if not interaction.user.guild_permissions.manage_guild:
-        return await interaction.response.send_message(embed=no_perm("Manage Guild"), ephemeral=True)
-    e = discord.Embed(title=f"📢 {title}", description=message, color=C_BLUE)
-    e.set_footer(text=f"Announced by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
-    content = ping.mention if ping else None
-    await channel.send(content=content, embed=e)
-    await interaction.response.send_message(embed=embed_success("Announcement Sent", f"Sent to {channel.mention}."), ephemeral=True)
-
-# ── Fun commands ─────────────────────────────────────────────
-@bot.tree.command(name="8ball", description="Ask the magic 8-ball a question")
-@app_commands.describe(question="Your question")
-async def eightball(interaction: discord.Interaction, question: str):
-    answers = [
-        "It is certain.", "It is decidedly so.", "Without a doubt.",
-        "Yes, definitely.", "You may rely on it.", "As I see it, yes.",
-        "Most likely.", "Outlook good.", "Yes.", "Signs point to yes.",
-        "Reply hazy, try again.", "Ask again later.", "Better not tell you now.",
-        "Cannot predict now.", "Concentrate and ask again.",
-        "Don't count on it.", "My reply is no.", "My sources say no.",
-        "Outlook not so good.", "Very doubtful."
-    ]
-    e = discord.Embed(title="🎱 Magic 8-Ball", color=C_PURPLE)
-    e.add_field(name="Question", value=question, inline=False)
-    e.add_field(name="Answer",   value=random.choice(answers), inline=False)
-    await interaction.response.send_message(embed=e)
-
-@bot.tree.command(name="coinflip", description="Flip a coin")
-async def coinflip(interaction: discord.Interaction):
-    result = random.choice(["🪙 Heads!", "🪙 Tails!"])
-    await interaction.response.send_message(embed=embed_info("Coin Flip", result, color=C_YELLOW))
-
-@bot.tree.command(name="roll", description="Roll dice — e.g. 2d6 or d20")
-@app_commands.describe(dice="Dice notation e.g. 2d6 d20 3d8")
-async def roll(interaction: discord.Interaction, dice: str = "d6"):
-    m = re.match(r"^(\d*)d(\d+)$", dice.lower())
-    if not m:
-        return await interaction.response.send_message(embed=embed_error("Invalid", "Use dice notation like `2d6` or `d20`."), ephemeral=True)
-    count = int(m.group(1) or 1)
-    sides = int(m.group(2))
-    if count > 50 or sides > 1000:
-        return await interaction.response.send_message(embed=embed_error("Too Large", "Max 50 dice, 1000 sides."), ephemeral=True)
-    rolls = [random.randint(1, sides) for _ in range(count)]
-    e = embed_info(f"🎲 Roll {dice.upper()}", color=C_TEAL)
-    e.add_field(name="Rolls",  value=str(rolls), inline=True)
-    e.add_field(name="Total",  value=str(sum(rolls)), inline=True)
-    await interaction.response.send_message(embed=e)
-
-@bot.tree.command(name="choose", description="Let the bot choose between options")
-@app_commands.describe(options="Options separated by | e.g. Pizza|Tacos|Burgers")
-async def choose(interaction: discord.Interaction, options: str):
-    choices = [o.strip() for o in options.split("|") if o.strip()]
-    if len(choices) < 2:
-        return await interaction.response.send_message(embed=embed_error("Invalid", "Provide at least 2 options separated by `|`."), ephemeral=True)
-    winner = random.choice(choices)
-    e = embed_info("🤔 I Choose...", f"**{winner}**", color=C_PURPLE)
-    e.set_footer(text=f"Picked from: {', '.join(choices)}")
-    await interaction.response.send_message(embed=e)
+    for i in range(len(opts)): await msg.add_reaction(emojis[i])
 
 @bot.tree.command(name="stats", description="View bot statistics")
 async def stats(interaction: discord.Interaction):
     total_warns = sum(len(u) for g in warnings_db.values() for u in g.values())
-    total_hardbans = sum(len(g) for g in hardban_db.values())
-    e = embed_info(f"{E['bot']} Bot Statistics", color=C_BLUE)
-    e.add_field(name="🏠 Servers",      value=str(len(bot.guilds)), inline=True)
-    e.add_field(name="👥 Total Members", value=f"{sum(g.member_count for g in bot.guilds):,}", inline=True)
-    e.add_field(name="⏱️ Ping",         value=f"{round(bot.latency*1000)}ms", inline=True)
-    e.add_field(name="⚠️ Total Warns",  value=str(total_warns), inline=True)
-    e.add_field(name="💀 Hardbans",     value=str(total_hardbans), inline=True)
-    e.add_field(name="🤖 Bot ID",       value=f"`{bot.user.id}`", inline=True)
+    e = discord.Embed(title="🤖  TSR Bot — Statistics", color=C_BLURPLE)
     e.set_thumbnail(url=bot.user.display_avatar.url)
+    e.add_field(name="🏠  Servers",       value=str(len(bot.guilds)),                              inline=True)
+    e.add_field(name="👥  Total Members", value=f"{sum(g.member_count for g in bot.guilds):,}",   inline=True)
+    e.add_field(name="📡  Ping",          value=f"{round(bot.latency*1000)}ms",                   inline=True)
+    e.add_field(name="⚠️  Total Warns",   value=str(total_warns),                                 inline=True)
+    e.add_field(name="💀  Hardbans",      value=str(sum(len(g) for g in hardban_db.values())),    inline=True)
+    e.add_field(name="🎫  Tickets",       value=str(sum(c.get("ticket_count",0) for c in guild_config.values())), inline=True)
+    e.set_footer(text="TSR Bot v3.0"); e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="help", description="View all available commands")
+@bot.tree.command(name="8ball", description="Ask the magic 8-ball")
+async def eightball(interaction: discord.Interaction, question: str):
+    answers = [
+        "✅  It is certain.","✅  Without a doubt.","✅  Yes, definitely.",
+        "✅  Signs point to yes.","✅  Most likely.","✅  Outlook good.",
+        "⚠️  Ask again later.","⚠️  Cannot predict now.","⚠️  Better not tell you now.",
+        "❌  Don't count on it.","❌  My sources say no.","❌  Very doubtful.",
+    ]
+    e = discord.Embed(title="🎱  Magic 8-Ball", color=C_PURPLE)
+    e.add_field(name="❓  Question", value=question,               inline=False)
+    e.add_field(name="🎱  Answer",   value=random.choice(answers), inline=False)
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="coinflip", description="Flip a coin")
+async def coinflip(interaction: discord.Interaction):
+    r = random.choice(["🪙  **Heads!**","🪙  **Tails!**"])
+    await interaction.response.send_message(embed=_e_info("Coin Flip", r, color=C_GOLD))
+
+@bot.tree.command(name="roll", description="Roll dice  e.g. 2d6 d20")
+async def roll(interaction: discord.Interaction, dice: str = "d6"):
+    m = re.match(r"^(\d*)d(\d+)$", dice.lower())
+    if not m: return await interaction.response.send_message(embed=_e_error("Invalid","Use `2d6` or `d20`."), ephemeral=True)
+    count = int(m.group(1) or 1); sides = int(m.group(2))
+    if count > 50 or sides > 1000: return await interaction.response.send_message(embed=_e_error("Too Large","Max 50d1000."), ephemeral=True)
+    rolls = [random.randint(1,sides) for _ in range(count)]
+    e = _e_info(f"🎲  {dice.upper()}", color=C_TEAL)
+    e.add_field(name="Rolls", value=str(rolls), inline=True)
+    e.add_field(name="Total", value=str(sum(rolls)), inline=True)
+    await interaction.response.send_message(embed=e)
+
+@bot.tree.command(name="choose", description="Let the bot choose between options")
+@app_commands.describe(options="Options separated by |")
+async def choose(interaction: discord.Interaction, options: str):
+    choices = [o.strip() for o in options.split("|") if o.strip()]
+    if len(choices) < 2: return await interaction.response.send_message(embed=_e_error("Invalid","At least 2 options."), ephemeral=True)
+    winner = random.choice(choices)
+    e = _e_info("🤔  I Choose…", f"**{winner}**", color=C_PURPLE)
+    e.set_footer(text=f"Options: {', '.join(choices)}")
+    await interaction.response.send_message(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  HELP COMMAND
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="help", description="Full command reference")
 async def help_cmd(interaction: discord.Interaction):
-    e = discord.Embed(title=f"{E['bot']} Command Reference", color=C_BLUE)
+    e = discord.Embed(
+        title="TSR Advanced Bot  ·  Command Reference",
+        description=(
+            "All commands use `/` (slash). Use `/setpermission` to control access.\n"
+            "Admins always have access to all commands."
+        ),
+        color=C_BLURPLE
+    )
     e.set_thumbnail(url=bot.user.display_avatar.url)
-    e.add_field(name="🔨 Core Moderation", value=(
-        "`/ban` `/unban` `/kick`\n"
+    e.add_field(name="🔨  Core Moderation", value=(
+        "`/ban` `/kick` `/unban`\n"
         "`/timeout` `/untimeout`\n"
         "`/warn` `/warnings` `/clearwarnings` `/delwarn`\n"
         "`/purge` `/slowmode` `/nick` `/role`"
     ), inline=True)
-    e.add_field(name="⚡ Advanced Mod", value=(
+    e.add_field(name="⚡  Advanced Mod", value=(
         "`/hardban` `/hardban_id` `/unhardban` `/hardbans`\n"
         "`/softban` `/tempban` `/banlist`\n"
         "`/massrole` `/vcmute` `/vcunmute`\n"
-        "`/deafen` `/undeafen` `/move`"
+        "`/deafen` `/undeafen` `/move`\n"
+        "`/lock` `/unlock` `/lockdown` `/endlockdown`"
     ), inline=True)
-    e.add_field(name="🔒 Channels", value=(
-        "`/lock` `/unlock`\n"
-        "`/lockdown` `/endlockdown`"
+    e.add_field(name="🛡️  Anti-Nuke", value=(
+        "`/setupantinuke` — configure protection\n"
+        "Detects: mass bans, kicks, channel deletes,\n"
+        "role deletes, webhook creations\n"
+        "Actions: strip roles, kick, or ban\n"
+        "Whitelist roles are immune"
     ), inline=True)
-    e.add_field(name="⚙️ Setup (Admin)", value=(
-        "`/setuplog` `/setupwelcome` `/setupgoodbye`\n"
-        "`/setuplock` `/setupverify` `/setuptickets`\n"
-        "`/setupautomod` `/badword` `/filterlist`"
+    e.add_field(name="🔑  Permission Control", value=(
+        "`/setpermission` — assign roles to cmd groups\n"
+        "`/viewpermissions` — view current permissions\n\n"
+        "Groups: `moderation` `utility` `community` `setup`\n"
+        "Prevents members using mod commands"
     ), inline=True)
-    e.add_field(name="✔️ Verification", value=(
-        "`/setupverify` — button/reaction/code\n"
-        "`/getcode` `/verify`"
+    e.add_field(name="📨  ModMail", value=(
+        "`/setupmodmail` — configure\n"
+        "`/mmclose` — close + transcript\n"
+        "`/mmreply` — reply via slash\n"
+        "Users DM the bot to open a thread"
     ), inline=True)
-    e.add_field(name="🎫 Tickets", value=(
-        "`/setuptickets`\n"
-        "Panel with open/close buttons"
+    e.add_field(name="🎫  Tickets", value=(
+        "`/setuptickets` — panel + transcript\n"
+        "`/closeticket` — close + save transcript\n"
+        "Auto-transcript on every close"
     ), inline=True)
-    e.add_field(name="🛠️ Utility", value=(
-        "`/userinfo` `/serverinfo` `/roleinfo`\n"
-        "`/channelinfo` `/avatar` `/banner`\n"
-        "`/ping` `/stats` `/snipe` `/editsnipe`\n"
-        "`/say` `/embed` `/announce`"
+    e.add_field(name="✔️  Verification (secure)", value=(
+        "`/setupverify` — method + min age + phone check\n"
+        "Methods: `button` `code` `math` `reaction`\n"
+        "Math CAPTCHA: solve a DM math question\n"
+        "Min account age gate configurable"
     ), inline=True)
-    e.add_field(name="🎉 Fun & Events", value=(
-        "`/poll` `/multipoll` `/giveaway`\n"
+    e.add_field(name="🎉  Giveaways", value=(
+        "`/giveaway` — start\n"
+        "`/greroll` — reroll winner\n"
+        "`/gend` — end early"
+    ), inline=True)
+    e.add_field(name="🏅  Levels & Community", value=(
+        "`/rank` `/leaderboard`\n"
+        "`/suggest` `/poll` `/multipoll`\n"
+        "`/afk` `/remind`\n"
+        "`/setuplevels` `/setupsuggestions`"
+    ), inline=True)
+    e.add_field(name="🎮  Roblox Watcher", value=(
+        "`/setuproblox` — set alert channel\n"
+        "Checks every 5 minutes\n"
+        "Alerts when a new version is released"
+    ), inline=True)
+    e.add_field(name="🛠️  Utility", value=(
+        "`/userinfo` `/serverinfo` `/roleinfo` `/channelinfo`\n"
+        "`/avatar` `/banner` `/ping` `/stats`\n"
+        "`/snipe` `/editsnipe` `/say` `/embed` `/announce`"
+    ), inline=True)
+    e.add_field(name="🎲  Fun", value=(
         "`/8ball` `/coinflip` `/roll` `/choose`"
     ), inline=True)
-    e.add_field(name="⚡ AutoMod (auto)", value=(
-        "• Anti-Spam (timeout + warn)\n"
-        "• Anti-Links (configurable)\n"
-        "• Anti-Caps (configurable)\n"
-        "• Bad Word Filter (configurable)\n"
-        "• Message/Voice/Edit logging"
-    ), inline=True)
-    e.set_footer(text="TSR Advanced Bot • Use /setuplog to enable logging first!")
-    e.timestamp = datetime.datetime.utcnow()
+    e.add_field(name="📋  Auto-Logging (log channel)", value=(
+        "All mod actions  •  Message edits & deletes\n"
+        "Member join/leave  •  Role changes  •  Nickname changes\n"
+        "Voice state changes  •  Channel create/delete\n"
+        "Anti-spam, anti-nuke, bad words, link blocks\n"
+        "Invite create/delete  •  Webhook activity"
+    ), inline=False)
+    e.set_footer(text="TSR Bot v3.0  •  /setuplog first to enable logging!")
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e, ephemeral=True)
 
-# ── Register persistent views on startup ─────────────────────
-@bot.event
-async def on_ready_views():
-    bot.add_view(VerifyButton())
-    bot.add_view(TicketButton())
-    bot.add_view(TicketCloseButton())
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║                        RUN                               ║
-# ╚══════════════════════════════════════════════════════════╝
+# ═══════════════════════════════════════════════════════════════════════════
+#  RUN
+# ═══════════════════════════════════════════════════════════════════════════
 
 async def main():
     async with bot:
-        bot.add_view(VerifyButton())
-        bot.add_view(TicketButton())
-        bot.add_view(TicketCloseButton())
         await bot.start(BOT_TOKEN)
 
-import asyncio
 asyncio.run(main())
