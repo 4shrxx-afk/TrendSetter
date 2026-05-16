@@ -11,14 +11,36 @@ import os
 # ║                    CONFIGURATION                         ║
 # ╚══════════════════════════════════════════════════════════╝
 #
-#  ⚠️  NEVER put your token here!
-#  Put it in an environment variable called DISCORD_TOKEN
-#  On Railway: go to Variables tab and add DISCORD_TOKEN = your_token
+#  Set ALL of these as Variables on Railway — never hardcode them!
 #
-BOT_TOKEN       = os.environ["DISCORD_TOKEN"]   # reads from environment — safe ✅
-LOG_CHANNEL     = "mod-logs"
-WELCOME_CHANNEL = "welcome"
-OWNER_IDS       = [1341036065397411926]          # your Discord user ID
+#  REQUIRED:
+#    DISCORD_TOKEN       — your bot token
+#
+#  REQUIRED — paste the channel IDs from your Discord server:
+#    LOG_CHANNEL_ID      — the channel ID for mod logs
+#    WELCOME_CHANNEL_ID  — the channel ID for welcome messages
+#    MODMAIL_CHANNEL_ID  — the channel ID where modmail appears
+#
+#  HOW TO GET A CHANNEL ID:
+#    In Discord → Settings → Advanced → turn on Developer Mode
+#    Then right-click any channel → "Copy Channel ID"
+#
+BOT_TOKEN          = os.environ["DISCORD_TOKEN"]
+LOG_CHANNEL_ID     = int(os.environ.get("LOG_CHANNEL_ID",     "0"))
+WELCOME_CHANNEL_ID = int(os.environ.get("WELCOME_CHANNEL_ID", "0"))
+MODMAIL_CHANNEL_ID = int(os.environ.get("MODMAIL_CHANNEL_ID", "0"))
+
+OWNER_IDS          = [1341036065397411926]   # your Discord user ID(s)
+
+# ── AutoMod config ───────────────────────────────────────────
+# Exact name of the role automod applies banned words to
+MEMBER_ROLE_NAME = "Members"
+
+# Words to catch for users with the Members role
+BANNED_WORDS = [
+    "nigga", "nigger", "fuck", "shit", "bitch",
+    "bastard", "asshole", "cunt", "whore", "slut", "retard",
+]
 
 # ── Brand colours ────────────────────────────────────────────
 C_RED    = 0xED4245
@@ -28,18 +50,13 @@ C_GREEN  = 0x57F287
 C_BLUE   = 0x5865F2
 C_PURPLE = 0x9B59B6
 
-# ── Emoji map ────────────────────────────────────────────────
+# ── Emoji shorthand ──────────────────────────────────────────
 E = {
-    "ban":     "🔨", "unban":   "🔓", "kick":    "👢",
-    "timeout": "⏱️", "warn":    "⚠️", "purge":   "🗑️",
-    "lock":    "🔒", "unlock":  "🔓", "slow":    "🐢",
-    "nick":    "✏️", "role":    "🎭", "success": "✅",
-    "error":   "❌", "shield":  "🛡️", "star":    "⭐",
-    "wave":    "👋", "crown":   "👑", "chart":   "📊",
-    "clock":   "🕐", "ping":    "🏓", "bot":     "🤖",
-    "server":  "🏠", "user":    "👤", "log":     "📝",
-    "fire":    "🔥", "diamond": "💎", "link":    "🔗",
-    "mail":    "📨",
+    "ban": "🔨", "unban": "🔓", "kick": "👢", "timeout": "⏱️",
+    "warn": "⚠️", "purge": "🗑️", "lock": "🔒", "unlock": "🔓",
+    "success": "✅", "error": "❌", "shield": "🛡️", "wave": "👋",
+    "ping": "🏓", "bot": "🤖", "server": "🏠", "user": "👤",
+    "mail": "📨", "automod": "⚡",
 }
 
 # ╔══════════════════════════════════════════════════════════╗
@@ -49,62 +66,79 @@ E = {
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
-warnings_db:  dict = {}   # { guild_id: { user_id: [ {reason, moderator, time} ] } }
-antispam_db:  dict = {}   # { guild_id: { user_id: [timestamps] } }
-ANTISPAM_LIMIT  = 5       # messages …
-ANTISPAM_WINDOW = 5       # … in this many seconds = spam
+warnings_db: dict = {}   # { "guild_id": { "user_id": [{reason, moderator, time}] } }
+antispam_db: dict = {}   # { "guild_id": { "user_id": [timestamps] } }
+
+ANTISPAM_LIMIT  = 5   # messages …
+ANTISPAM_WINDOW = 5   # … within this many seconds = spam
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║                       UTILITIES                          ║
+# ╚══════════════════════════════════════════════════════════╝
+
+def now_utc() -> datetime.datetime:
+    """Timezone-aware UTC timestamp — no deprecation warnings."""
+    return datetime.datetime.now(datetime.timezone.utc)
+
+def get_channel(guild: discord.Guild, channel_id: int):
+    return guild.get_channel(channel_id) if channel_id else None
+
+def parse_duration(s: str) -> datetime.timedelta | None:
+    """Parse strings like 10m / 2h / 1d into a timedelta."""
+    m = re.match(r"^(\d+)([smhd])$", s.lower())
+    if not m:
+        return None
+    v, u = int(m.group(1)), m.group(2)
+    return {"s": datetime.timedelta(seconds=v), "m": datetime.timedelta(minutes=v),
+            "h": datetime.timedelta(hours=v),   "d": datetime.timedelta(days=v)}.get(u)
+
+def warn_user(guild_id: str, user_id: str, reason: str, mod_name: str) -> int:
+    warnings_db.setdefault(guild_id, {}).setdefault(user_id, [])
+    warnings_db[guild_id][user_id].append({
+        "reason":    reason,
+        "moderator": mod_name,
+        "time":      now_utc().strftime("%b %d, %Y %H:%M UTC"),
+    })
+    return len(warnings_db[guild_id][user_id])
+
+def has_member_role(member: discord.Member) -> bool:
+    return any(r.name == MEMBER_ROLE_NAME for r in member.roles)
 
 # ╔══════════════════════════════════════════════════════════╗
 # ║                   EMBED BUILDERS                         ║
 # ╚══════════════════════════════════════════════════════════╝
 
 def embed_success(title: str, description: str = None) -> discord.Embed:
-    e = discord.Embed(title=f"{E['success']} {title}", description=description, color=C_GREEN)
-    e.timestamp = datetime.datetime.utcnow()
+    e = discord.Embed(title=f"✅  {title}", description=description, color=C_GREEN)
+    e.timestamp = now_utc()
     return e
 
 def embed_error(title: str, description: str = None) -> discord.Embed:
-    e = discord.Embed(title=f"{E['error']} {title}", description=description, color=C_RED)
-    e.timestamp = datetime.datetime.utcnow()
+    e = discord.Embed(title=f"❌  {title}", description=description, color=C_RED)
+    e.timestamp = now_utc()
     return e
 
 def embed_info(title: str, description: str = None, color: int = C_BLUE) -> discord.Embed:
     e = discord.Embed(title=title, description=description, color=color)
-    e.timestamp = datetime.datetime.utcnow()
+    e.timestamp = now_utc()
     return e
 
 def embed_mod(action: str, emoji: str, moderator, target,
               reason: str, color: int, extra: dict = None) -> discord.Embed:
-    e = discord.Embed(title=f"{emoji} {action}", color=color,
-                      timestamp=datetime.datetime.utcnow())
-    e.set_author(
-        name=f"Moderation • {moderator.guild.name}",
-        icon_url=moderator.guild.icon.url if moderator.guild.icon else None
-    )
+    e = discord.Embed(title=f"{emoji}  {action}", color=color, timestamp=now_utc())
+    guild = getattr(moderator, "guild", None)
+    if guild:
+        e.set_author(name=f"Moderation • {guild.name}",
+                     icon_url=guild.icon.url if guild.icon else None)
     e.set_thumbnail(url=target.display_avatar.url)
     e.add_field(name="👤 Target",    value=f"{target.mention}\n`{target} • {target.id}`", inline=True)
     e.add_field(name="🛡️ Moderator", value=f"{moderator.mention}\n`{moderator}`",          inline=True)
-    e.add_field(name="📝 Reason",    value=f"```{reason or 'No reason provided'}```",      inline=False)
+    e.add_field(name="📋 Reason",    value=f"```{reason or 'No reason provided'}```",      inline=False)
     if extra:
         for k, v in extra.items():
             e.add_field(name=k, value=v, inline=True)
     e.set_footer(text="TSR Moderation System")
     return e
-
-# ╔══════════════════════════════════════════════════════════╗
-# ║                       HELPERS                            ║
-# ╚══════════════════════════════════════════════════════════╝
-
-async def send_log(guild: discord.Guild, embed: discord.Embed) -> None:
-    ch = discord.utils.get(guild.text_channels, name=LOG_CHANNEL)
-    if ch:
-        await ch.send(embed=embed)
-
-async def dm_member(member: discord.Member, embed: discord.Embed) -> None:
-    try:
-        await member.send(embed=embed)
-    except Exception:
-        pass  # DMs may be closed — that's fine
 
 def no_perm(action: str) -> discord.Embed:
     return embed_error("Missing Permissions",
@@ -114,27 +148,20 @@ def role_too_high() -> discord.Embed:
     return embed_error("Role Hierarchy",
                        "You cannot moderate someone with an equal or higher role.")
 
-def warn_user(guild_id: str, user_id: str, reason: str, mod_name: str) -> int:
-    warnings_db.setdefault(guild_id, {}).setdefault(user_id, [])
-    warnings_db[guild_id][user_id].append({
-        "reason":    reason,
-        "moderator": mod_name,
-        "time":      datetime.datetime.utcnow().strftime("%b %d, %Y %H:%M UTC"),
-    })
-    return len(warnings_db[guild_id][user_id])
+# ╔══════════════════════════════════════════════════════════╗
+# ║                     LOG / DM HELPERS                     ║
+# ╚══════════════════════════════════════════════════════════╝
 
-def parse_duration(s: str) -> datetime.timedelta | None:
-    """Parse a duration string like 10m, 2h, 1d into a timedelta."""
-    m = re.match(r"^(\d+)([smhd])$", s.lower())
-    if not m:
-        return None
-    v, u = int(m.group(1)), m.group(2)
-    return {
-        "s": datetime.timedelta(seconds=v),
-        "m": datetime.timedelta(minutes=v),
-        "h": datetime.timedelta(hours=v),
-        "d": datetime.timedelta(days=v),
-    }.get(u)
+async def send_log(guild: discord.Guild, embed: discord.Embed) -> None:
+    ch = get_channel(guild, LOG_CHANNEL_ID)
+    if ch:
+        await ch.send(embed=embed)
+
+async def dm_member(member, embed: discord.Embed) -> None:
+    try:
+        await member.send(embed=embed)
+    except Exception:
+        pass  # DMs may be closed — silently ignore
 
 # ╔══════════════════════════════════════════════════════════╗
 # ║                        EVENTS                            ║
@@ -164,51 +191,134 @@ async def status_rotation():
 
 @bot.event
 async def on_member_join(member: discord.Member):
-    ch = discord.utils.get(member.guild.text_channels, name=WELCOME_CHANNEL)
+    ch = get_channel(member.guild, WELCOME_CHANNEL_ID)
     if not ch:
         return
     e = discord.Embed(
-        title=f"{E['wave']} Welcome to {member.guild.name}!",
+        title=f"👋  Welcome to {member.guild.name}!",
         description=(
             f"Hey {member.mention}, we're glad you're here!\n\n"
-            f"{E['star']} You are member **#{member.guild.member_count}**\n"
-            f"{E['shield']} Please read the rules and enjoy your stay!"
+            f"⭐  You are member **#{member.guild.member_count}**\n"
+            f"🛡️  Please read the rules and enjoy your stay!\n"
+            f"📨  DM me if you need help — I'll create a support ticket!"
         ),
         color=C_BLUE,
     )
     e.set_thumbnail(url=member.display_avatar.url)
-    e.set_footer(text=f"Account created {member.created_at.strftime('%b %d, %Y')}")
-    e.timestamp = datetime.datetime.utcnow()
+    if member.guild.banner:
+        e.set_image(url=member.guild.banner.url)
+    e.set_footer(text=f"Account created {member.created_at.strftime('%b %d, %Y')}",
+                 icon_url=member.display_avatar.url)
+    e.timestamp = now_utc()
     await ch.send(embed=e)
 
 @bot.event
 async def on_member_remove(member: discord.Member):
-    ch = discord.utils.get(member.guild.text_channels, name=LOG_CHANNEL)
+    ch = get_channel(member.guild, LOG_CHANNEL_ID)
     if not ch:
         return
     e = embed_info(
-        f"{E['wave']} Member Left",
-        f"**{member}** (`{member.id}`) has left the server.",
+        "👋  Member Left",
+        f"**{member}** (`{member.id}`) has left the server.\n"
+        f"**Joined:** <t:{int(member.joined_at.timestamp())}:R>",
         color=C_ORANGE,
     )
     e.set_thumbnail(url=member.display_avatar.url)
+    e.set_footer(text=f"Member count: {member.guild.member_count}")
     await ch.send(embed=e)
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild:
+    if message.author.bot:
+        return
+
+    # ── Mod Mail: DMs sent TO the bot ───────────────────────
+    if isinstance(message.channel, discord.DMChannel):
+        guild = None
+        for g in bot.guilds:
+            if g.get_member(message.author.id):
+                guild = g
+                break
+        if not guild:
+            return
+
+        modmail_ch = get_channel(guild, MODMAIL_CHANNEL_ID)
+        if not modmail_ch:
+            await message.channel.send(embed=embed_error(
+                "ModMail Unavailable",
+                "The modmail system isn't set up yet. Please contact a staff member directly.",
+            ))
+            return
+
+        # Send to modmail channel
+        e = discord.Embed(
+            title="📨  New ModMail Ticket",
+            description=f"```{message.content or '(no text — see attachment)'}```",
+            color=C_PURPLE,
+        )
+        e.set_author(name=str(message.author), icon_url=message.author.display_avatar.url)
+        e.add_field(name="👤 From",  value=f"{message.author.mention} (`{message.author.id}`)", inline=True)
+        e.add_field(name="📅 Sent",  value=f"<t:{int(now_utc().timestamp())}:R>",              inline=True)
+        if message.attachments:
+            e.set_image(url=message.attachments[0].url)
+        e.set_footer(text="Staff: use /modmail-reply <user_id> <message> to respond")
+        e.timestamp = now_utc()
+        await modmail_ch.send(embed=e)
+
+        # Confirm receipt to the user
+        confirm = discord.Embed(
+            title="📨  Message Received!",
+            description=(
+                "Your message has been sent to the **staff team**.\n"
+                "We'll get back to you as soon as possible!\n\n"
+                f"**Your message:**\n```{(message.content or '(attachment)')[:500]}```"
+            ),
+            color=C_GREEN,
+        )
+        confirm.set_footer(text="TSR Support System")
+        confirm.timestamp = now_utc()
+        await message.channel.send(embed=confirm)
+        return  # stop — don't run guild logic on DMs
+
+    # ── Guild message handling ────────────────────────────────
+    if not message.guild:
         return
 
     guild_id = str(message.guild.id)
     user_id  = str(message.author.id)
-    now      = datetime.datetime.utcnow().timestamp()
 
-    # ── Anti-spam tracking ───────────────────────────────────
+    # Automod: banned words — only Members role, not mods
+    if has_member_role(message.author) and not message.author.guild_permissions.manage_messages:
+        content_lower = message.content.lower()
+        for word in BANNED_WORDS:
+            if re.search(rf'\b{re.escape(word)}\b', content_lower):
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
+                warn_count = warn_user(guild_id, user_id,
+                                       f"AutoMod: Banned word ({word})", "AutoMod")
+                alert = embed_error(
+                    "🚫  Language Warning",
+                    f"{message.author.mention}, that language isn't allowed here!\n"
+                    f"You now have **{warn_count}** warning(s).",
+                )
+                alert.set_footer(text="AutoMod • Keep it clean!")
+                await message.channel.send(embed=alert, delete_after=6)
+                await send_log(message.guild, embed_mod(
+                    "AutoMod: Banned Word", "⚡", message.guild.me, message.author,
+                    f'Used banned word: "{word}"', C_ORANGE,
+                    {"⚠️ Warnings": str(warn_count), "💬 Channel": message.channel.mention},
+                ))
+                break  # one trigger per message is enough
+
+    # Anti-spam
+    ts_now = now_utc().timestamp()
     antispam_db.setdefault(guild_id, {}).setdefault(user_id, [])
     antispam_db[guild_id][user_id] = [
-        t for t in antispam_db[guild_id][user_id] if now - t < ANTISPAM_WINDOW
+        t for t in antispam_db[guild_id][user_id] if ts_now - t < ANTISPAM_WINDOW
     ]
-    antispam_db[guild_id][user_id].append(now)
+    antispam_db[guild_id][user_id].append(ts_now)
 
     if len(antispam_db[guild_id][user_id]) >= ANTISPAM_LIMIT:
         if not message.author.guild_permissions.manage_messages:
@@ -228,16 +338,15 @@ async def on_message(message: discord.Message):
                 pass
             warn_user(guild_id, user_id, "AutoMod: Spamming", "AutoMod")
             alert = embed_error(
-                "⚡ Anti-Spam Triggered",
+                "⚡  Anti-Spam Triggered",
                 f"{message.author.mention} was timed out for **5 minutes** for spamming.",
             )
             alert.set_footer(text="AutoMod System")
             await message.channel.send(embed=alert, delete_after=8)
-            await send_log(
-                message.guild,
-                embed_mod("AutoMod: Spam", "⚡", message.guild.me,
-                          message.author, "Spamming messages", C_ORANGE),
-            )
+            await send_log(message.guild, embed_mod(
+                "AutoMod: Spam", "⚡", message.guild.me, message.author,
+                "Spamming messages", C_ORANGE,
+            ))
 
     await bot.process_commands(message)
 
@@ -259,19 +368,20 @@ async def ban(interaction: discord.Interaction, member: discord.Member,
             embed=embed_error("Invalid Target", "You cannot ban yourself."), ephemeral=True)
 
     dm_e = discord.Embed(
-        title=f"{E['ban']} You've been banned from {interaction.guild.name}", color=C_RED)
-    dm_e.add_field(name="Reason", value=reason or "No reason provided")
+        title=f"🔨  You've been banned from **{interaction.guild.name}**", color=C_RED)
+    dm_e.add_field(name="📋 Reason", value=reason or "No reason provided")
     dm_e.set_footer(text="Contact a server admin if you believe this is a mistake.")
+    dm_e.timestamp = now_utc()
     await dm_member(member, dm_e)
 
     await member.ban(reason=reason, delete_message_days=min(max(delete_days, 0), 7))
     res_e = embed_success("Member Banned", f"{member.mention} has been permanently banned.")
-    res_e.add_field(name="User",   value=f"`{member}`",         inline=True)
-    res_e.add_field(name="Reason", value=reason or "No reason", inline=True)
+    res_e.add_field(name="👤 User",   value=f"`{member}`",         inline=True)
+    res_e.add_field(name="📋 Reason", value=reason or "No reason", inline=True)
     await interaction.response.send_message(embed=res_e)
     await send_log(interaction.guild, embed_mod(
         "Member Banned", E["ban"], interaction.user, member, reason, C_RED,
-        {"Deleted Messages": f"{delete_days} day(s)"},
+        {"🗓️ Msgs Deleted": f"{delete_days} day(s)"},
     ))
 
 @bot.tree.command(name="unban", description="Unban a user by their ID")
@@ -283,7 +393,7 @@ async def unban(interaction: discord.Interaction, user_id: str, reason: str = No
         user = await bot.fetch_user(int(user_id))
         await interaction.guild.unban(user, reason=reason)
         res_e = embed_success("Member Unbanned", f"**{user}** has been unbanned.")
-        res_e.add_field(name="Reason", value=reason or "No reason provided")
+        res_e.add_field(name="📋 Reason", value=reason or "No reason provided")
         await interaction.response.send_message(embed=res_e)
         await send_log(interaction.guild, embed_mod(
             "Member Unbanned", E["unban"], interaction.user, user, reason, C_GREEN))
@@ -301,15 +411,16 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
         return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
 
     dm_e = discord.Embed(
-        title=f"{E['kick']} You've been kicked from {interaction.guild.name}", color=C_ORANGE)
-    dm_e.add_field(name="Reason", value=reason or "No reason provided")
+        title=f"👢  You've been kicked from **{interaction.guild.name}**", color=C_ORANGE)
+    dm_e.add_field(name="📋 Reason", value=reason or "No reason provided")
     dm_e.set_footer(text="You may rejoin with a valid invite.")
+    dm_e.timestamp = now_utc()
     await dm_member(member, dm_e)
 
     await member.kick(reason=reason)
     res_e = embed_success("Member Kicked", f"{member.mention} has been kicked.")
-    res_e.add_field(name="User",   value=f"`{member}`",         inline=True)
-    res_e.add_field(name="Reason", value=reason or "No reason", inline=True)
+    res_e.add_field(name="👤 User",   value=f"`{member}`",         inline=True)
+    res_e.add_field(name="📋 Reason", value=reason or "No reason", inline=True)
     await interaction.response.send_message(embed=res_e)
     await send_log(interaction.guild, embed_mod(
         "Member Kicked", E["kick"], interaction.user, member, reason, C_ORANGE))
@@ -324,31 +435,31 @@ async def timeout_cmd(interaction: discord.Interaction, member: discord.Member,
             embed=no_perm("Moderate Members"), ephemeral=True)
     if member.top_role >= interaction.user.top_role and interaction.user.id not in OWNER_IDS:
         return await interaction.response.send_message(embed=role_too_high(), ephemeral=True)
-
     td = parse_duration(duration)
     if not td:
         return await interaction.response.send_message(
-            embed=embed_error("Invalid Duration", "Use `10m`, `2h`, `1d` format."), ephemeral=True)
-
+            embed=embed_error("Invalid Duration", "Use formats like `10m`, `2h`, `1d`."),
+            ephemeral=True)
     await member.timeout(td, reason=reason)
     res_e = embed_success("Member Timed Out", f"{member.mention} timed out for **{duration}**.")
-    res_e.add_field(name="Duration", value=duration,              inline=True)
-    res_e.add_field(name="Reason",   value=reason or "No reason", inline=True)
+    res_e.add_field(name="⏱️ Duration", value=duration,              inline=True)
+    res_e.add_field(name="📋 Reason",   value=reason or "No reason", inline=True)
     await interaction.response.send_message(embed=res_e)
-
     dm_e = discord.Embed(
-        title=f"{E['timeout']} You've been timed out in {interaction.guild.name}", color=C_YELLOW)
-    dm_e.add_field(name="Duration", value=duration)
-    dm_e.add_field(name="Reason",   value=reason or "No reason provided")
+        title=f"⏱️  You've been timed out in **{interaction.guild.name}**", color=C_YELLOW)
+    dm_e.add_field(name="⏱️ Duration", value=duration)
+    dm_e.add_field(name="📋 Reason",   value=reason or "No reason provided")
+    dm_e.timestamp = now_utc()
     await dm_member(member, dm_e)
     await send_log(interaction.guild, embed_mod(
         "Member Timed Out", E["timeout"], interaction.user, member, reason, C_YELLOW,
-        {"Duration": duration},
+        {"⏱️ Duration": duration},
     ))
 
 @bot.tree.command(name="untimeout", description="Remove timeout from a member")
 @app_commands.describe(member="Member to untimeout", reason="Reason")
-async def untimeout(interaction: discord.Interaction, member: discord.Member, reason: str = None):
+async def untimeout(interaction: discord.Interaction, member: discord.Member,
+                    reason: str = None):
     if not interaction.user.guild_permissions.moderate_members:
         return await interaction.response.send_message(
             embed=no_perm("Moderate Members"), ephemeral=True)
@@ -356,32 +467,31 @@ async def untimeout(interaction: discord.Interaction, member: discord.Member, re
     await interaction.response.send_message(
         embed=embed_success("Timeout Removed", f"Timeout removed from {member.mention}."))
     await send_log(interaction.guild, embed_mod(
-        "Timeout Removed", E["untimeout" if "untimeout" in E else "unlock"],
-        interaction.user, member, reason, C_GREEN))
+        "Timeout Removed", "🔓", interaction.user, member, reason, C_GREEN))
 
 @bot.tree.command(name="warn", description="Warn a member")
 @app_commands.describe(member="Member to warn", reason="Reason")
-async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = None):
+async def warn(interaction: discord.Interaction, member: discord.Member,
+               reason: str = None):
     if not interaction.user.guild_permissions.manage_messages:
         return await interaction.response.send_message(
             embed=no_perm("Manage Messages"), ephemeral=True)
-
     count = warn_user(str(interaction.guild.id), str(member.id),
                       reason or "No reason provided", str(interaction.user))
     dm_e = discord.Embed(
-        title=f"{E['warn']} You've received a warning in {interaction.guild.name}",
-        color=C_YELLOW)
-    dm_e.add_field(name="Reason",          value=reason or "No reason provided")
-    dm_e.add_field(name="Total Warnings",  value=str(count))
+        title=f"⚠️  You've received a warning in **{interaction.guild.name}**", color=C_YELLOW)
+    dm_e.add_field(name="📋 Reason",         value=reason or "No reason provided", inline=False)
+    dm_e.add_field(name="⚠️ Total Warnings", value=str(count),                    inline=True)
+    dm_e.set_footer(text="Please follow the server rules.")
+    dm_e.timestamp = now_utc()
     await dm_member(member, dm_e)
-
     res_e = embed_success("Member Warned",
                           f"{member.mention} warned. They now have **{count}** warning(s).")
-    res_e.add_field(name="Reason", value=reason or "No reason provided")
+    res_e.add_field(name="📋 Reason", value=reason or "No reason provided")
     await interaction.response.send_message(embed=res_e)
     await send_log(interaction.guild, embed_mod(
         "Member Warned", E["warn"], interaction.user, member, reason, C_YELLOW,
-        {"Total Warnings": str(count)},
+        {"⚠️ Total Warnings": str(count)},
     ))
 
 @bot.tree.command(name="warnings", description="View warnings for a member")
@@ -393,15 +503,15 @@ async def warnings_cmd(interaction: discord.Interaction, member: discord.Member)
         return await interaction.response.send_message(
             embed=embed_success("No Warnings", f"{member.mention} has no warnings."),
             ephemeral=True)
-    e = embed_info(f"{E['warn']} Warnings for {member}", color=C_YELLOW)
+    e = embed_info(f"⚠️  Warnings for {member.display_name}", color=C_YELLOW)
     e.set_thumbnail(url=member.display_avatar.url)
     for i, w in enumerate(user_warns, 1):
         e.add_field(
-            name=f"Warning {i}",
-            value=f"**Reason:** {w['reason']}\n**By:** {w['moderator']}\n**At:** {w['time']}",
+            name=f"⚠️ Warning #{i}",
+            value=f"**Reason:** {w['reason']}\n**By:** {w['moderator']}\n**When:** {w['time']}",
             inline=False,
         )
-    e.set_footer(text=f"Total: {len(user_warns)} warning(s)")
+    e.set_footer(text=f"Total: {len(user_warns)} warning(s) • {member}")
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="clearwarnings", description="Clear all warnings for a member")
@@ -412,12 +522,11 @@ async def clearwarnings(interaction: discord.Interaction, member: discord.Member
             embed=no_perm("Manage Messages"), ephemeral=True)
     warnings_db.setdefault(str(interaction.guild.id), {})[str(member.id)] = []
     await interaction.response.send_message(
-        embed=embed_success("Warnings Cleared",
-                            f"All warnings cleared for {member.mention}."))
+        embed=embed_success("Warnings Cleared", f"All warnings cleared for {member.mention}."))
 
 @bot.tree.command(name="purge", description="Delete messages from this channel")
 @app_commands.describe(amount="Number of messages (1–100)",
-                       member="Only delete from this member")
+                       member="Only delete messages from this member")
 async def purge(interaction: discord.Interaction, amount: int,
                 member: discord.Member = None):
     if not interaction.user.guild_permissions.manage_messages:
@@ -428,16 +537,23 @@ async def purge(interaction: discord.Interaction, amount: int,
             embed=embed_error("Invalid Amount", "Amount must be between 1 and 100."),
             ephemeral=True)
     await interaction.response.defer(ephemeral=True)
-    check = (lambda m: m.author == member) if member else None
-    deleted = await interaction.channel.purge(limit=amount, check=check)
+
+    # FIXED: define check function properly instead of passing None as callable
+    if member is not None:
+        def check(m: discord.Message) -> bool:
+            return m.author == member
+        deleted = await interaction.channel.purge(limit=amount, check=check)
+    else:
+        deleted = await interaction.channel.purge(limit=amount)
+
     target_str = f" from {member.mention}" if member else ""
     await interaction.followup.send(
         embed=embed_success("Messages Purged",
                             f"Deleted **{len(deleted)}** message(s){target_str}."),
         ephemeral=True)
     await send_log(interaction.guild, embed_info(
-        f"{E['purge']} Purge",
-        f"**{len(deleted)}** messages deleted in {interaction.channel.mention}{target_str}.\n"
+        "🗑️  Channel Purge",
+        f"**{len(deleted)}** messages deleted in {interaction.channel.mention}{target_str}\n"
         f"**By:** {interaction.user.mention}",
         color=C_BLUE,
     ))
@@ -456,73 +572,135 @@ async def slowmode(interaction: discord.Interaction, seconds: int):
     msg = f"Slowmode set to **{seconds}s**." if seconds else "Slowmode **disabled**."
     await interaction.response.send_message(embed=embed_success("Slowmode Updated", msg))
 
-@bot.tree.command(name="lock", description="Lock the current channel")
-@app_commands.describe(reason="Reason for locking")
-async def lock(interaction: discord.Interaction, reason: str = None):
+@bot.tree.command(name="lock",
+                  description="Lock a channel — members can view but NOT send messages")
+@app_commands.describe(reason="Reason for locking",
+                       role="Role to restrict (default: @everyone)")
+async def lock(interaction: discord.Interaction, reason: str = None,
+               role: discord.Role = None):
     if not interaction.user.guild_permissions.manage_channels:
         return await interaction.response.send_message(
             embed=no_perm("Manage Channels"), ephemeral=True)
-    ow = interaction.channel.overwrites_for(interaction.guild.default_role)
-    ow.send_messages = False
-    await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=ow)
-    await interaction.response.send_message(embed=embed_info(
-        f"{E['lock']} Channel Locked",
+    target_role = role or interaction.guild.default_role
+    ow = interaction.channel.overwrites_for(target_role)
+    ow.send_messages            = False   # cannot type
+    ow.send_messages_in_threads = False
+    ow.add_reactions            = False
+    ow.view_channel             = True    # CAN still see the channel
+    await interaction.channel.set_permissions(target_role, overwrite=ow)
+    e = embed_info(
+        "🔒  Channel Locked",
+        f"{interaction.channel.mention} is now **locked**.\n"
+        f"**Restricted role:** {target_role.mention}\n"
+        f"**Reason:** {reason or 'No reason provided'}\n\n"
+        f"Members can still **view** the channel but cannot send messages.",
+        color=C_RED,
+    )
+    e.set_footer(text=f"Locked by {interaction.user} • /unlock to reopen")
+    await interaction.response.send_message(embed=e)
+    await send_log(interaction.guild, embed_info(
+        "🔒  Channel Locked",
+        f"**Channel:** {interaction.channel.mention}\n"
+        f"**By:** {interaction.user.mention}\n"
         f"**Reason:** {reason or 'No reason provided'}",
         color=C_RED,
     ))
 
-@bot.tree.command(name="unlock", description="Unlock the current channel")
-async def unlock(interaction: discord.Interaction):
+@bot.tree.command(name="unlock", description="Unlock a channel — restore send permissions")
+@app_commands.describe(role="Role to restore (default: @everyone)")
+async def unlock(interaction: discord.Interaction, role: discord.Role = None):
     if not interaction.user.guild_permissions.manage_channels:
         return await interaction.response.send_message(
             embed=no_perm("Manage Channels"), ephemeral=True)
-    ow = interaction.channel.overwrites_for(interaction.guild.default_role)
-    ow.send_messages = True
-    await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=ow)
-    await interaction.response.send_message(embed=embed_info(
-        f"{E['unlock']} Channel Unlocked", "This channel is now open.", color=C_GREEN))
+    target_role = role or interaction.guild.default_role
+    ow = interaction.channel.overwrites_for(target_role)
+    ow.send_messages            = True
+    ow.send_messages_in_threads = True
+    ow.add_reactions            = True
+    ow.view_channel             = True
+    await interaction.channel.set_permissions(target_role, overwrite=ow)
+    e = embed_info(
+        "🔓  Channel Unlocked",
+        f"{interaction.channel.mention} is now **open**.\n"
+        f"**Restored for:** {target_role.mention}",
+        color=C_GREEN,
+    )
+    e.set_footer(text=f"Unlocked by {interaction.user}")
+    await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="lockdown", description="Lock ALL channels in the server (emergency)")
+@bot.tree.command(name="lockdown",
+                  description="🚨 Lock ALL channels — members can view but NOT type")
 @app_commands.describe(reason="Reason for lockdown")
 async def lockdown(interaction: discord.Interaction, reason: str = None):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message(
             embed=no_perm("Administrator"), ephemeral=True)
     await interaction.response.defer()
+    everyone = interaction.guild.default_role
     count = 0
     for ch in interaction.guild.text_channels:
         try:
-            ow = ch.overwrites_for(interaction.guild.default_role)
-            ow.send_messages = False
-            await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
+            ow = ch.overwrites_for(everyone)
+            ow.send_messages            = False
+            ow.send_messages_in_threads = False
+            ow.add_reactions            = False
+            ow.view_channel             = True    # still visible
+            await ch.set_permissions(everyone, overwrite=ow)
             count += 1
         except Exception:
             pass
-    await interaction.followup.send(embed=embed_info(
-        "🚨 SERVER LOCKDOWN",
-        f"**{count}** channels locked.\n"
-        f"**Reason:** {reason or 'No reason'}\n"
-        f"**By:** {interaction.user.mention}",
+    e = embed_info(
+        "🚨  SERVER LOCKDOWN ACTIVE",
+        f"**{count}** channels have been locked.\n"
+        f"Members can **view** channels but **cannot send messages**.\n\n"
+        f"**Reason:** {reason or 'No reason provided'}\n"
+        f"**By:** {interaction.user.mention}\n\n"
+        f"Use `/endlockdown` to restore the server.",
+        color=C_RED,
+    )
+    e.set_footer(text="TSR Emergency System • /endlockdown to lift")
+    e.timestamp = now_utc()
+    await interaction.followup.send(embed=e)
+    await send_log(interaction.guild, embed_info(
+        "🚨  Server Lockdown Started",
+        f"**By:** {interaction.user.mention}\n"
+        f"**Channels locked:** {count}\n"
+        f"**Reason:** {reason or 'No reason provided'}",
         color=C_RED,
     ))
 
-@bot.tree.command(name="endlockdown", description="End server lockdown and unlock all channels")
+@bot.tree.command(name="endlockdown", description="End the server lockdown and restore all channels")
 async def endlockdown(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message(
             embed=no_perm("Administrator"), ephemeral=True)
     await interaction.response.defer()
+    everyone = interaction.guild.default_role
     count = 0
     for ch in interaction.guild.text_channels:
         try:
-            ow = ch.overwrites_for(interaction.guild.default_role)
-            ow.send_messages = True
-            await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
+            ow = ch.overwrites_for(everyone)
+            ow.send_messages            = True
+            ow.send_messages_in_threads = True
+            ow.add_reactions            = True
+            ow.view_channel             = True
+            await ch.set_permissions(everyone, overwrite=ow)
             count += 1
         except Exception:
             pass
-    await interaction.followup.send(
-        embed=embed_success("Lockdown Ended", f"**{count}** channels unlocked."))
+    e = embed_success(
+        "Lockdown Ended",
+        f"**{count}** channels have been unlocked.\n"
+        f"The server is back to normal.\n\n"
+        f"**By:** {interaction.user.mention}",
+    )
+    e.set_footer(text="TSR Emergency System")
+    await interaction.followup.send(embed=e)
+    await send_log(interaction.guild, embed_info(
+        "✅  Server Lockdown Ended",
+        f"**By:** {interaction.user.mention}\n**Channels restored:** {count}",
+        color=C_GREEN,
+    ))
 
 @bot.tree.command(name="nick", description="Change a member's nickname")
 @app_commands.describe(member="Target member", nickname="New nickname (blank to reset)")
@@ -534,10 +712,12 @@ async def nick(interaction: discord.Interaction, member: discord.Member,
     old = member.display_name
     await member.edit(nick=nickname)
     await interaction.response.send_message(embed=embed_success(
-        "Nickname Updated", f"**{old}** → **{nickname or member.name}**"))
+        "Nickname Updated",
+        f"**Before:** {old}\n**After:** {nickname or member.name}",
+    ))
 
 @bot.tree.command(name="role", description="Add or remove a role from a member")
-@app_commands.describe(member="Target member", role="Role to toggle")
+@app_commands.describe(member="Target member", role="Role to add/remove")
 async def role_cmd(interaction: discord.Interaction, member: discord.Member,
                    role: discord.Role):
     if not interaction.user.guild_permissions.manage_roles:
@@ -549,11 +729,58 @@ async def role_cmd(interaction: discord.Interaction, member: discord.Member,
     if role in member.roles:
         await member.remove_roles(role)
         await interaction.response.send_message(
-            embed=embed_success("Role Removed", f"Removed {role.mention} from {member.mention}."))
+            embed=embed_success("Role Removed",
+                                f"Removed {role.mention} from {member.mention}."))
     else:
         await member.add_roles(role)
         await interaction.response.send_message(
             embed=embed_success("Role Added", f"Added {role.mention} to {member.mention}."))
+
+# ╔══════════════════════════════════════════════════════════╗
+# ║                       MOD MAIL                           ║
+# ╚══════════════════════════════════════════════════════════╝
+
+@bot.tree.command(name="modmail-reply",
+                  description="Reply to a user's modmail ticket")
+@app_commands.describe(user_id="The user's Discord ID", message="Your reply message")
+async def modmail_reply(interaction: discord.Interaction, user_id: str, message: str):
+    if not interaction.user.guild_permissions.manage_messages:
+        return await interaction.response.send_message(
+            embed=no_perm("Manage Messages"), ephemeral=True)
+    try:
+        user = await bot.fetch_user(int(user_id))
+        reply_e = discord.Embed(
+            title=f"📨  Staff Reply — {interaction.guild.name}",
+            description=f"```{message}```",
+            color=C_BLUE,
+        )
+        reply_e.set_author(name=str(interaction.user),
+                           icon_url=interaction.user.display_avatar.url)
+        reply_e.set_footer(text="Reply by DMing the bot to continue the conversation.")
+        reply_e.timestamp = now_utc()
+        await user.send(embed=reply_e)
+        await interaction.response.send_message(
+            embed=embed_success("Reply Sent", f"Your reply was sent to **{user}**."),
+            ephemeral=True)
+
+        # Log reply in modmail channel
+        modmail_ch = get_channel(interaction.guild, MODMAIL_CHANNEL_ID)
+        if modmail_ch:
+            log_e = discord.Embed(
+                title="📨  ModMail Reply Sent",
+                description=f"```{message}```",
+                color=C_BLUE,
+            )
+            log_e.set_author(name=str(interaction.user),
+                             icon_url=interaction.user.display_avatar.url)
+            log_e.add_field(name="👤 To",    value=f"{user.mention} (`{user.id}`)", inline=True)
+            log_e.add_field(name="🛡️ Staff", value=interaction.user.mention,        inline=True)
+            log_e.timestamp = now_utc()
+            await modmail_ch.send(embed=log_e)
+    except (discord.NotFound, ValueError):
+        await interaction.response.send_message(
+            embed=embed_error("User Not Found", "Couldn't find a user with that ID."),
+            ephemeral=True)
 
 # ╔══════════════════════════════════════════════════════════╗
 # ║                   UTILITY COMMANDS                       ║
@@ -571,77 +798,79 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member = No
     if m.public_flags.early_supporter: badges.append("⭐ Early Supporter")
     if m.bot:                          badges.append("🤖 Bot")
     warns = len(warnings_db.get(str(interaction.guild.id), {}).get(str(m.id), []))
-    e = discord.Embed(
-        title=f"{E['user']} User Information",
-        color=m.color if m.color.value else C_BLUE,
-    )
+    e = discord.Embed(title=f"👤  {m.display_name}",
+                      color=m.color if m.color.value else C_BLUE)
     e.set_thumbnail(url=m.display_avatar.url)
     e.set_author(name=str(m), icon_url=m.display_avatar.url)
-    e.add_field(name="🏷️ Username",       value=f"`{m}`",                                  inline=True)
-    e.add_field(name="🆔 User ID",         value=f"`{m.id}`",                               inline=True)
-    e.add_field(name="✏️ Nickname",        value=m.nick or "None",                          inline=True)
-    e.add_field(name="📅 Account Created", value=f"<t:{int(m.created_at.timestamp())}:R>",  inline=True)
-    e.add_field(name="📥 Joined Server",   value=f"<t:{int(m.joined_at.timestamp())}:R>",   inline=True)
-    e.add_field(name="👑 Top Role",        value=m.top_role.mention,                        inline=True)
-    e.add_field(name=f"🎭 Roles ({len(roles)})", value=" ".join(roles[:10]) or "None",      inline=False)
+    e.add_field(name="🏷️ Username",       value=f"`{m}`",                                 inline=True)
+    e.add_field(name="🆔 User ID",         value=f"`{m.id}`",                              inline=True)
+    e.add_field(name="✏️ Nickname",        value=m.nick or "None",                         inline=True)
+    e.add_field(name="📅 Account Created", value=f"<t:{int(m.created_at.timestamp())}:R>", inline=True)
+    e.add_field(name="📥 Joined Server",   value=f"<t:{int(m.joined_at.timestamp())}:R>",  inline=True)
+    e.add_field(name="👑 Top Role",        value=m.top_role.mention,                       inline=True)
+    e.add_field(name=f"🎭 Roles ({len(roles)})", value=" ".join(roles[:10]) or "None",     inline=False)
     if badges:
-        e.add_field(name="🏅 Badges", value="\n".join(badges), inline=False)
-    e.add_field(name="⚠️ Warnings", value=str(warns), inline=True)
-    e.set_footer(text=f"Requested by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+        e.add_field(name="🏅 Badges", value="  ".join(badges), inline=False)
+    e.add_field(name="⚠️ Warnings", value=f"`{warns}`",                    inline=True)
+    e.add_field(name="🤖 Bot",      value="Yes" if m.bot else "No",        inline=True)
+    e.set_footer(text=f"Requested by {interaction.user}",
+                 icon_url=interaction.user.display_avatar.url)
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="serverinfo", description="Get info about the server")
+@bot.tree.command(name="serverinfo", description="Get info about this server")
 async def serverinfo(interaction: discord.Interaction):
     g      = interaction.guild
     bots   = sum(1 for m in g.members if m.bot)
     humans = g.member_count - bots
-    online = sum(1 for m in g.members if m.status != discord.Status.offline and not m.bot)
-    e = discord.Embed(title=f"{E['server']} Server Information", color=C_BLUE)
-    if g.icon:
-        e.set_thumbnail(url=g.icon.url)
-    if g.banner:
-        e.set_image(url=g.banner.url)
+    online = sum(1 for m in g.members
+                 if m.status != discord.Status.offline and not m.bot)
+    e = discord.Embed(title=f"🏠  {g.name}", color=C_BLUE)
+    if g.icon:   e.set_thumbnail(url=g.icon.url)
+    if g.banner: e.set_image(url=g.banner.url)
     e.set_author(name=g.name, icon_url=g.icon.url if g.icon else None)
-    e.add_field(name="🏠 Name",         value=g.name,                                                           inline=True)
-    e.add_field(name="🆔 ID",           value=f"`{g.id}`",                                                       inline=True)
-    e.add_field(name="👑 Owner",        value=g.owner.mention,                                                   inline=True)
-    e.add_field(name="👥 Members",      value=f"👤 {humans} humans\n🤖 {bots} bots",                             inline=True)
-    e.add_field(name="🟢 Online",       value=str(online),                                                       inline=True)
+    e.add_field(name="🆔 Server ID",    value=f"`{g.id}`",                                                inline=True)
+    e.add_field(name="👑 Owner",        value=g.owner.mention,                                            inline=True)
+    e.add_field(name="📅 Created",      value=f"<t:{int(g.created_at.timestamp())}:R>",                   inline=True)
+    e.add_field(name="👥 Members",      value=f"👤 {humans} humans\n🤖 {bots} bots",                       inline=True)
+    e.add_field(name="🟢 Online",       value=str(online),                                                inline=True)
     e.add_field(name="💬 Channels",     value=f"💬 {len(g.text_channels)} text\n🔊 {len(g.voice_channels)} voice", inline=True)
-    e.add_field(name="🎭 Roles",        value=str(len(g.roles)),                                                 inline=True)
-    e.add_field(name="😀 Emojis",       value=str(len(g.emojis)),                                                inline=True)
-    e.add_field(name="💎 Boosts",       value=f"Level {g.premium_tier} ({g.premium_subscription_count})",        inline=True)
-    e.add_field(name="📅 Created",      value=f"<t:{int(g.created_at.timestamp())}:R>",                          inline=True)
-    e.add_field(name="🔒 Verification", value=str(g.verification_level).title(),                                 inline=True)
-    e.set_footer(text=f"Requested by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    e.add_field(name="🎭 Roles",        value=str(len(g.roles)),                                          inline=True)
+    e.add_field(name="😀 Emojis",       value=str(len(g.emojis)),                                         inline=True)
+    e.add_field(name="💎 Boost Level",  value=f"Level {g.premium_tier} ({g.premium_subscription_count} boosts)", inline=True)
+    e.add_field(name="🔒 Verification", value=str(g.verification_level).title(),                          inline=True)
+    e.set_footer(text=f"Requested by {interaction.user}",
+                 icon_url=interaction.user.display_avatar.url)
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="avatar", description="Get a member's avatar")
 @app_commands.describe(member="Member to get avatar of")
 async def avatar(interaction: discord.Interaction, member: discord.Member = None):
     m = member or interaction.user
-    e = discord.Embed(title=f"{m.display_name}'s Avatar", color=C_BLUE)
+    e = discord.Embed(title=f"🖼️  {m.display_name}'s Avatar", color=C_BLUE)
     e.set_image(url=m.display_avatar.url)
-    e.add_field(name="🔗 Links", value=(
-        f"[PNG]({m.display_avatar.with_format('png').url}) | "
-        f"[JPG]({m.display_avatar.with_format('jpg').url}) | "
+    e.add_field(name="🔗 Download Links", value=(
+        f"[PNG]({m.display_avatar.with_format('png').url}) • "
+        f"[JPG]({m.display_avatar.with_format('jpg').url}) • "
         f"[WEBP]({m.display_avatar.with_format('webp').url})"
     ))
+    e.set_footer(text=f"Requested by {interaction.user}")
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="ping", description="Check bot latency")
 async def ping(interaction: discord.Interaction):
     latency = round(bot.latency * 1000)
     quality = ("🟢 Excellent" if latency < 100
-                else "🟡 Good" if latency < 200
-                else "🔴 High")
-    await interaction.response.send_message(embed=embed_info(
-        f"{E['ping']} Pong!",
+               else "🟡 Good" if latency < 200
+               else "🔴 High")
+    e = embed_info(
+        "🏓  Pong!",
         f"**Latency:** `{latency}ms`\n**Status:** {quality}",
         color=C_BLUE,
-    ))
+    )
+    await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="say", description="Make the bot send a message")
 @app_commands.describe(message="Message content", channel="Channel to send to")
@@ -669,8 +898,9 @@ async def embed_cmd(interaction: discord.Interaction, title: str, description: s
         col = C_BLUE
     target = channel or interaction.channel
     e = discord.Embed(title=title, description=description, color=col)
-    e.set_footer(text=f"Sent by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    e.set_footer(text=f"Sent by {interaction.user}",
+                 icon_url=interaction.user.display_avatar.url)
+    e.timestamp = now_utc()
     await target.send(embed=e)
     await interaction.response.send_message(
         embed=embed_success("Embed Sent", f"Sent to {target.mention}."), ephemeral=True)
@@ -678,9 +908,15 @@ async def embed_cmd(interaction: discord.Interaction, title: str, description: s
 @bot.tree.command(name="poll", description="Create a yes/no poll")
 @app_commands.describe(question="Poll question")
 async def poll(interaction: discord.Interaction, question: str):
-    e = discord.Embed(title="📊 Poll", description=f"**{question}**", color=C_PURPLE)
-    e.set_footer(text=f"Poll by {interaction.user}")
-    e.timestamp = datetime.datetime.utcnow()
+    e = discord.Embed(
+        title="📊  Community Poll",
+        description=f"**{question}**",
+        color=C_PURPLE,
+    )
+    e.add_field(name="Cast your vote!", value="✅ Yes  •  ❌ No")
+    e.set_footer(text=f"Poll by {interaction.user}",
+                 icon_url=interaction.user.display_avatar.url)
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e)
     msg = await interaction.original_response()
     await msg.add_reaction("✅")
@@ -689,8 +925,8 @@ async def poll(interaction: discord.Interaction, question: str):
 @bot.tree.command(name="help", description="View all available commands")
 async def help_cmd(interaction: discord.Interaction):
     e = discord.Embed(
-        title=f"{E['bot']} Command List",
-        description="All commands use `/` — type `/` in chat to see them all.",
+        title="🤖  Trendsetter — Command List",
+        description="All commands are slash commands. Type `/` in chat to see them all.",
         color=C_BLUE,
     )
     e.set_thumbnail(url=bot.user.display_avatar.url)
@@ -708,14 +944,19 @@ async def help_cmd(interaction: discord.Interaction):
         "`/avatar` `/ping`\n"
         "`/say` `/embed` `/poll`"
     ), inline=True)
-    e.add_field(name="⚡ AutoMod", value=(
-        "• Anti-spam (auto timeout + warn)\n"
-        "• Welcome messages\n"
-        "• Leave logging\n"
-        "• Full mod action logging"
+    e.add_field(name="📨 Mod Mail", value=(
+        "**DM the bot** to open a support ticket!\n"
+        "Staff reply with `/modmail-reply <id> <msg>`"
     ), inline=False)
-    e.set_footer(text="TSR Bot • Made with ❤️")
-    e.timestamp = datetime.datetime.utcnow()
+    e.add_field(name="⚡ Auto Systems", value=(
+        "• **Anti-spam** → auto 5-min timeout + warn\n"
+        "• **Banned words** → delete + warn (Members role only)\n"
+        "• **Welcome** messages on join\n"
+        "• **Mod logs** on all actions"
+    ), inline=False)
+    e.set_footer(text="TSR Bot • DM me for support!",
+                 icon_url=bot.user.display_avatar.url)
+    e.timestamp = now_utc()
     await interaction.response.send_message(embed=e, ephemeral=True)
 
 # ╔══════════════════════════════════════════════════════════╗
