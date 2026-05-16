@@ -176,34 +176,40 @@ def _get_cmd_group(cmd_name: str) -> Optional[str]:
 
 def has_cmd_perm(interaction: discord.Interaction, cmd_name: str) -> bool:
     """
-    Returns True if the user is allowed to run this command.
-    Rules:
-      1. Bot owner or server admin → always allowed
-      2. If the command's group has role assignments → user must have one of those roles
-      3. Commands in 'moderation' or 'setup' group → require Discord's native permissions
-         (these are already enforced by @app_commands.default_permissions, this is a safety check)
+    Permission check for custom role-based command access.
+
+    Rules (evaluated in order — first match wins):
+      1. Bot owner → always allowed
+      2. Server administrator → always allowed
+      3. Individual command override configured → user must have that role
+      4. Group configured → user must have a role in that group
+      5. No config at all → pass through (Discord's native @default_permissions protects mod cmds)
+
+    Intent: use /setpermission to GRANT community commands (rank, leaderboard, suggest…)
+    to specific roles.  Moderation commands are always protected by Discord's own
+    permission system (@app_commands.default_permissions) regardless of this check.
     """
     if interaction.user.id in OWNER_IDS:
         return True
     if interaction.user.guild_permissions.administrator:
         return True
 
-    gid   = str(interaction.guild.id)
-    group = _get_cmd_group(cmd_name)
-    perms = cmd_perms_db.get(gid, {})
+    gid           = str(interaction.guild.id)
+    group         = _get_cmd_group(cmd_name)
+    perms         = cmd_perms_db.get(gid, {})
+    user_role_ids = {str(r.id) for r in interaction.user.roles}
 
+    # Individual command override takes highest priority
+    if cmd_name in perms:
+        return bool(user_role_ids & set(perms[cmd_name]))
+
+    # Group-level check
     if group and group in perms:
-        allowed_role_ids = perms[group]
-        user_role_ids    = [str(r.id) for r in interaction.user.roles]
-        if any(rid in allowed_role_ids for rid in user_role_ids):
-            return True
-        # Also check individual command overrides
-        if cmd_name in perms:
-            if any(rid in perms[cmd_name] for rid in user_role_ids):
-                return True
-        return False
+        return bool(user_role_ids & set(perms[group]))
 
-    # Default: rely on Discord's built-in permission checks (already on the command)
+    # Nothing configured — pass through.
+    # Moderation/setup commands are already gated by Discord's built-in
+    # @app_commands.default_permissions so non-mods can't reach them anyway.
     return True
 
 def perm_denied() -> discord.Embed:
@@ -2102,15 +2108,29 @@ async def purge(interaction: discord.Interaction, amount: int, member: discord.M
     if not has_cmd_perm(interaction, "purge"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
     if not 1 <= amount <= 100: return await interaction.response.send_message(embed=_e_error("Invalid","1–100 only."), ephemeral=True)
     await interaction.response.defer(ephemeral=True)
-    check = (lambda m: m.author == member) if member else None
-    deleted = await interaction.channel.purge(limit=amount, check=check)
-    target_str = f" from {member.mention}" if member else ""
-    await interaction.followup.send(embed=_e_success("Purged",f"Deleted **{len(deleted)}** message(s){target_str}."), ephemeral=True)
-    await send_log(interaction.guild, _log_embed("Messages Purged", C_BLUE, icon="🗑️",
-        fields=[("📂  Channel", interaction.channel.mention, True),
-                ("🛡️  By",      interaction.user.mention,    True),
-                ("🔢  Count",   str(len(deleted)),           True),
-                ("👤  Target",  member.mention if member else "Everyone", True)]))
+    try:
+        ch = interaction.channel
+        # Build kwargs — do NOT pass check=None; omit it entirely when no filter
+        purge_kwargs: dict = {"limit": amount}
+        if member is not None:
+            # Capture member.id in closure to avoid reference issues
+            _mid = member.id
+            purge_kwargs["check"] = lambda m: m.author.id == _mid
+        deleted = await ch.purge(**purge_kwargs)
+        target_str = f" from {member.mention}" if member else ""
+        await interaction.followup.send(
+            embed=_e_success("Purged", f"Deleted **{len(deleted)}** message(s){target_str}."),
+            ephemeral=True)
+        await send_log(interaction.guild, _log_embed("Messages Purged", C_BLUE, icon="🗑️",
+            fields=[("📂  Channel", ch.mention, True),
+                    ("🛡️  By",      interaction.user.mention,    True),
+                    ("🔢  Count",   str(len(deleted)),           True),
+                    ("👤  Target",  member.mention if member else "Everyone", True)]))
+    except discord.Forbidden:
+        await interaction.followup.send(embed=_e_error("Missing Permissions",
+            "I need **Manage Messages** permission in this channel."), ephemeral=True)
+    except discord.HTTPException as ex:
+        await interaction.followup.send(embed=_e_error("Purge Failed", str(ex)), ephemeral=True)
 
 @bot.tree.command(name="slowmode", description="Set channel slowmode")
 @app_commands.describe(seconds="0 to disable, max 21600")
@@ -2127,42 +2147,76 @@ async def slowmode(interaction: discord.Interaction, seconds: int):
                 ("🛡️  By",      interaction.user.mention,    True)]))
 
 @bot.tree.command(name="lock", description="Lock this channel")
+@app_commands.describe(reason="Reason for locking")
 @app_commands.default_permissions(manage_channels=True)
 async def lock(interaction: discord.Interaction, reason: str = None):
-    if not has_cmd_perm(interaction, "lock"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
-    cfg  = gcfg(interaction.guild.id); perm = cfg.get("lock_deny_perm","send_messages"); ch = interaction.channel
-    ow   = ch.overwrites_for(interaction.guild.default_role)
-    if perm in ("all","send_messages"):              ow.send_messages = False
-    if perm in ("all","add_reactions"):              ow.add_reactions = False
-    if perm in ("all","use_application_commands"):  ow.use_application_commands = False
-    await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
-    for rid in cfg.get("lock_exempt_roles",[]):
-        role = interaction.guild.get_role(int(rid))
-        if role:
-            row = ch.overwrites_for(role)
-            if perm in ("all","send_messages"):             row.send_messages = True
-            if perm in ("all","add_reactions"):             row.add_reactions = True
-            if perm in ("all","use_application_commands"): row.use_application_commands = True
-            await ch.set_permissions(role, overwrite=row)
-    e = discord.Embed(title="🔒  Channel Locked", description=f"**Reason:** {reason or 'No reason'}", color=C_RED)
-    e.timestamp = now_utc()
-    await interaction.response.send_message(embed=e)
-    await send_log(interaction.guild, _log_embed("Channel Locked", C_RED, icon="🔒",
-        fields=[("📂  Channel", ch.mention, True),("🛡️  By",interaction.user.mention,True),("📝  Reason",reason or "None",True)]))
+    if not has_cmd_perm(interaction, "lock"):
+        return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    # Defer FIRST — set_permissions is an API call and can exceed the 3s interaction timeout
+    await interaction.response.defer()
+    cfg = gcfg(interaction.guild.id)
+    perm = cfg.get("lock_deny_perm", "send_messages")
+    ch = interaction.channel
+    try:
+        ow = ch.overwrites_for(interaction.guild.default_role)
+        if perm in ("all", "send_messages"):             ow.send_messages = False
+        if perm in ("all", "add_reactions"):             ow.add_reactions = False
+        if perm in ("all", "use_application_commands"):  ow.use_application_commands = False
+        await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
+        # Restore access for exempt roles
+        for rid in cfg.get("lock_exempt_roles", []):
+            role = interaction.guild.get_role(int(rid))
+            if role:
+                row = ch.overwrites_for(role)
+                if perm in ("all", "send_messages"):             row.send_messages = True
+                if perm in ("all", "add_reactions"):             row.add_reactions = True
+                if perm in ("all", "use_application_commands"): row.use_application_commands = True
+                await ch.set_permissions(role, overwrite=row)
+        e = discord.Embed(title="🔒  Channel Locked",
+                          description=f"**Reason:** {reason or 'No reason'}\n**By:** {interaction.user.mention}",
+                          color=C_RED)
+        e.timestamp = now_utc()
+        e.set_footer(text="TSR Bot  •  Use /unlock to reopen")
+        await interaction.followup.send(embed=e)
+        await send_log(interaction.guild, _log_embed("Channel Locked", C_RED, icon="🔒",
+            fields=[("📂  Channel", ch.mention, True),
+                    ("🛡️  By",      interaction.user.mention, True),
+                    ("📝  Reason",  reason or "No reason", True)]))
+    except discord.Forbidden:
+        await interaction.followup.send(embed=_e_error("Missing Permissions",
+            "I need **Manage Channels** permission and my role must be above the locked role."))
+    except Exception as ex:
+        await interaction.followup.send(embed=_e_error("Lock Failed", str(ex)))
 
 @bot.tree.command(name="unlock", description="Unlock this channel")
 @app_commands.default_permissions(manage_channels=True)
 async def unlock(interaction: discord.Interaction):
-    if not has_cmd_perm(interaction, "unlock"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
-    cfg  = gcfg(interaction.guild.id); perm = cfg.get("lock_deny_perm","send_messages"); ch = interaction.channel
-    ow   = ch.overwrites_for(interaction.guild.default_role)
-    if perm in ("all","send_messages"):             ow.send_messages = None
-    if perm in ("all","add_reactions"):             ow.add_reactions = None
-    if perm in ("all","use_application_commands"): ow.use_application_commands = None
-    await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
-    await interaction.response.send_message(embed=discord.Embed(title="🔓  Channel Unlocked",description="This channel is now open.",color=C_GREEN))
-    await send_log(interaction.guild, _log_embed("Channel Unlocked", C_GREEN, icon="🔓",
-        fields=[("📂  Channel", ch.mention, True),("🛡️  By",interaction.user.mention,True)]))
+    if not has_cmd_perm(interaction, "unlock"):
+        return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    # Defer FIRST — API call can exceed 3s interaction timeout
+    await interaction.response.defer()
+    cfg = gcfg(interaction.guild.id)
+    perm = cfg.get("lock_deny_perm", "send_messages")
+    ch = interaction.channel
+    try:
+        ow = ch.overwrites_for(interaction.guild.default_role)
+        if perm in ("all", "send_messages"):             ow.send_messages = None
+        if perm in ("all", "add_reactions"):             ow.add_reactions = None
+        if perm in ("all", "use_application_commands"): ow.use_application_commands = None
+        await ch.set_permissions(interaction.guild.default_role, overwrite=ow)
+        e = discord.Embed(title="🔓  Channel Unlocked",
+                          description=f"This channel is now open.\n**By:** {interaction.user.mention}",
+                          color=C_GREEN)
+        e.timestamp = now_utc()
+        await interaction.followup.send(embed=e)
+        await send_log(interaction.guild, _log_embed("Channel Unlocked", C_GREEN, icon="🔓",
+            fields=[("📂  Channel", ch.mention, True),
+                    ("🛡️  By",      interaction.user.mention, True)]))
+    except discord.Forbidden:
+        await interaction.followup.send(embed=_e_error("Missing Permissions",
+            "I need **Manage Channels** permission."))
+    except Exception as ex:
+        await interaction.followup.send(embed=_e_error("Unlock Failed", str(ex)))
 
 @bot.tree.command(name="lockdown", description="🚨 Lock ALL channels (emergency)")
 @app_commands.default_permissions(administrator=True)
@@ -2842,6 +2896,48 @@ async def help_cmd(interaction: discord.Interaction):
     e.set_footer(text="TSR Bot v3.0  •  /setuplog first to enable logging!")
     e.timestamp = now_utc()
     await interaction.response.send_message(embed=e, ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  GLOBAL ERROR HANDLER  — nothing silently fails
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Catch-all so the user always gets a visible error instead of "Interaction failed"."""
+    msg = None
+
+    if isinstance(error, app_commands.MissingPermissions):
+        msg = (_e_error("Missing Permissions",
+                        "You don't have the Discord permission required to use this command.\n"
+                        f"Required: `{'`, `'.join(error.missing_permissions)}`"))
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        msg = (_e_error("Bot Missing Permissions",
+                        f"I'm missing: `{'`, `'.join(error.missing_permissions)}`\n"
+                        "Please give me the required permissions and try again."))
+    elif isinstance(error, app_commands.CommandOnCooldown):
+        msg = _e_error("Slow Down!", f"Try again in **{error.retry_after:.1f}s**.")
+    elif isinstance(error, app_commands.NoPrivateMessage):
+        msg = _e_error("Server Only", "This command can only be used in a server.")
+    else:
+        # Unwrap the original exception if wrapped
+        orig = getattr(error, "original", error)
+        if isinstance(orig, discord.Forbidden):
+            msg = _e_error("Permission Denied",
+                           "I don't have permission to do that. Check my role permissions.")
+        elif isinstance(orig, discord.HTTPException):
+            msg = _e_error("Discord Error", f"`{orig.status}` — {orig.text[:200]}")
+        else:
+            msg = _e_error("Unexpected Error", f"```{str(orig)[:500]}```")
+            print(f"[ERROR] /{interaction.command.name if interaction.command else '?'}: {orig}")
+
+    if msg:
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=msg, ephemeral=True)
+        except Exception:
+            pass
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  RUN
