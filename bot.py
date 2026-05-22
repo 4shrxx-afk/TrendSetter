@@ -3673,7 +3673,7 @@ async def inviteinfo(interaction: discord.Interaction, member: discord.Member = 
 C_SPOTIFY = 0x1DB954   # Spotify green
 
 YDL_OPTS = {
-    "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
@@ -3682,11 +3682,31 @@ YDL_OPTS = {
     "socket_timeout": 30,
     "retries": 3,
     "extractor_retries": 3,
-    "http_chunk_size": 10485760,
+    # Use TV-embedded + Android clients — these bypass YouTube datacenter IP blocks
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["tv_embedded", "android", "web"],
+            "player_skip": ["webpage"],
+        }
+    },
+}
+# SoundCloud fallback — used when YouTube is blocked (common on Railway/cloud IPs)
+YDL_OPTS_SC = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "scsearch",
+    "source_address": "0.0.0.0",
+    "socket_timeout": 30,
+    "retries": 3,
 }
 FFMPEG_OPTS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin",
-    "options": "-vn -bufsize 64k",
+    "before_options": (
+        "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 "
+        "-nostdin -loglevel warning"
+    ),
+    "options": "-vn",
 }
 
 # Per-guild music state (in-memory)
@@ -3725,12 +3745,10 @@ def _sp_id(url: str, kind: str) -> Optional[str]:
     m = re.search(rf"spotify\.com/{kind}/([A-Za-z0-9]+)", url)
     return m.group(1) if m else None
 
-def _ytdl_fetch(query: str) -> Optional[dict]:
-    """Synchronous yt-dlp fetch — run in executor."""
-    if not YT_DLP_OK:
-        return None
+def _extract_with_opts(query: str, opts: dict) -> Optional[dict]:
+    """Run a single yt-dlp extraction with the given opts dict."""
     try:
-        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(query, download=False)
             if info and "entries" in info:
                 entries = [e for e in info["entries"] if e]
@@ -3747,9 +3765,43 @@ def _ytdl_fetch(query: str) -> Optional[dict]:
                 "thumbnail":   info.get("thumbnail", ""),
                 "uploader":    info.get("uploader", ""),
             }
-    except Exception as e:
-        print(f"[yt-dlp] fetch error for {query!r}: {e}")
+    except Exception as exc:
         return None
+
+def _ytdl_fetch(query: str) -> Optional[dict]:
+    """
+    Try YouTube (with TV/Android client to bypass datacenter IP blocks),
+    then fall back to SoundCloud if YouTube fails.
+    """
+    if not YT_DLP_OK:
+        return None
+
+    is_url = query.startswith("http")
+
+    # ── Attempt 1: YouTube with TV-embedded / Android client ──────────────
+    result = _extract_with_opts(query, YDL_OPTS)
+    if result:
+        return result
+
+    # ── Attempt 2: SoundCloud fallback (cloud IPs are NOT blocked there) ──
+    # For direct URLs that failed, extract a search term and try SoundCloud.
+    # For plain text queries, search SoundCloud directly.
+    sc_query = query
+    if is_url:
+        # Try to get the video title from the URL path as a search hint
+        # e.g. "watch?v=..." → not useful, just use "music" as generic fallback
+        # Better: strip the URL and use it as a ytsearch on SoundCloud
+        sc_query = re.sub(r"https?://[^\s]+", "", query).strip() or query
+
+    sc_result = _extract_with_opts(
+        f"scsearch:{sc_query}" if not sc_query.startswith("http") else sc_query,
+        YDL_OPTS_SC)
+    if sc_result:
+        print(f"[Music] YouTube blocked, playing from SoundCloud: {sc_result['title']}")
+        return sc_result
+
+    print(f"[Music] All sources failed for: {query!r}")
+    return None
 
 async def _yt_async(query: str) -> Optional[dict]:
     loop = asyncio.get_event_loop()
