@@ -3673,24 +3673,29 @@ async def inviteinfo(interaction: discord.Interaction, member: discord.Member = 
 C_SPOTIFY = 0x1DB954   # Spotify green
 
 YDL_OPTS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
+    "socket_timeout": 30,
+    "retries": 3,
+    "extractor_retries": 3,
+    "http_chunk_size": 10485760,
 }
 FFMPEG_OPTS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -nostdin",
+    "options": "-vn -bufsize 64k",
 }
 
 # Per-guild music state (in-memory)
-music_queues:  dict = {}   # gid -> list[track dict]
-music_playing: dict = {}   # gid -> track dict | None
-music_loop:    dict = {}   # gid -> bool
-music_volume:  dict = {}   # gid -> float (0.0 – 2.0, default 1.0)
-music_vc:      dict = {}   # gid -> discord.VoiceClient
+music_queues:   dict = {}   # gid -> list[track dict]
+music_playing:  dict = {}   # gid -> track dict | None
+music_loop:     dict = {}   # gid -> bool
+music_volume:   dict = {}   # gid -> float (0.0 – 2.0, default 1.0)
+music_vc:       dict = {}   # gid -> discord.VoiceClient
+music_dc_tasks: dict = {}   # gid -> asyncio.Task (pending auto-disconnect)
 
 # ── Spotify client factory ────────────────────────────────────────────────
 
@@ -3721,25 +3726,29 @@ def _sp_id(url: str, kind: str) -> Optional[str]:
     return m.group(1) if m else None
 
 def _ytdl_fetch(query: str) -> Optional[dict]:
-    """Synchronous — run in executor."""
+    """Synchronous yt-dlp fetch — run in executor."""
     if not YT_DLP_OK:
         return None
     try:
         with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
             info = ydl.extract_info(query, download=False)
             if info and "entries" in info:
-                info = info["entries"][0]
-            if not info:
+                entries = [e for e in info["entries"] if e]
+                if not entries:
+                    return None
+                info = entries[0]
+            if not info or not info.get("url"):
                 return None
             return {
-                "url":         info.get("url", ""),
+                "url":         info["url"],
                 "webpage_url": info.get("webpage_url", ""),
                 "title":       info.get("title", "Unknown"),
                 "duration":    info.get("duration", 0),
                 "thumbnail":   info.get("thumbnail", ""),
                 "uploader":    info.get("uploader", ""),
             }
-    except Exception:
+    except Exception as e:
+        print(f"[yt-dlp] fetch error for {query!r}: {e}")
         return None
 
 async def _yt_async(query: str) -> Optional[dict]:
@@ -3814,22 +3823,25 @@ async def _resolve_input(raw: str, sp) -> list:
 
     # ── Fallback: YouTube URL or plain search ──────────────────────────────
     if not tracks:
-        # If it was a Spotify link but we have no credentials, give a clear error flag
         if "open.spotify.com" in raw and not sp:
             tracks.append({
                 "title":        "⚠️ Spotify credentials not set",
                 "artist":       "",
-                "search_query": None,   # sentinel: skip playback, show error
+                "search_query": None,
                 "album_art":    "",
                 "spotify_url":  raw,
                 "duration":     0,
                 "_error":       "Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in Railway → Variables to use Spotify links. For now, try `/play Song Name Artist`.",
             })
         else:
+            # For YouTube URLs: use the URL as webpage_url so we fetch the real title at play time.
+            # For plain searches: use raw as search_query.
+            is_yt_url = raw.startswith("http") and ("youtube.com" in raw or "youtu.be" in raw)
             tracks.append({
-                "title":        raw,
+                "title":        raw if not is_yt_url else "Loading...",
                 "artist":       "",
                 "search_query": raw,
+                "webpage_url":  raw if is_yt_url else "",
                 "album_art":    "",
                 "spotify_url":  "",
                 "duration":     0,
@@ -3837,79 +3849,129 @@ async def _resolve_input(raw: str, sp) -> list:
 
     return tracks
 
-async def _play_next(guild: discord.Guild):
+async def _cancel_dc_task(gid: str):
+    """Cancel any pending auto-disconnect task for this guild."""
+    task = music_dc_tasks.pop(gid, None)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+async def _auto_dc(guild: discord.Guild, gid: str):
+    """Wait 3 minutes of silence then disconnect — cancellable."""
+    await asyncio.sleep(180)
+    vc = music_vc.get(gid)
+    if vc and vc.is_connected() and not vc.is_playing():
+        try:
+            await vc.disconnect()
+        except Exception:
+            pass
+        music_vc.pop(gid, None)
+    music_dc_tasks.pop(gid, None)
+
+async def _play_next(guild: discord.Guild, err_channel=None):
     """Dequeue next track and start playback. Called after each track ends."""
     gid = str(guild.id)
     vc  = music_vc.get(gid)
     if not vc or not vc.is_connected():
         return
 
-    # Loop: re-fetch stream URL for current track and replay
+    # Cancel any pending auto-disconnect — we're about to do something
+    await _cancel_dc_task(gid)
+
+    # ── Loop mode: replay current track ───────────────────────────────────
     if music_loop.get(gid) and music_playing.get(gid):
-        cur = music_playing[gid]
-        info = await _yt_async(cur.get("webpage_url") or cur.get("search_query", cur["title"]))
+        cur  = music_playing[gid]
+        info = await _yt_async(cur.get("webpage_url") or cur.get("search_query") or cur["title"])
         if info:
             cur["url"] = info["url"]
+            vol = music_volume.get(gid, 1.0)
             src = discord.PCMVolumeTransformer(
-                discord.FFmpegPCMAudio(info["url"], **FFMPEG_OPTS),
-                volume=music_volume.get(gid, 1.0))
+                discord.FFmpegPCMAudio(info["url"], **FFMPEG_OPTS), volume=vol)
             vc.play(src, after=lambda e: asyncio.run_coroutine_threadsafe(
-                _play_next(guild), bot.loop))
+                _play_next(guild, err_channel), bot.loop))
             return
+        # If re-fetch fails, fall through to next track
 
+    # ── Get next track from queue ──────────────────────────────────────────
     q = music_queues.get(gid, [])
     if not q:
         music_playing[gid] = None
-        # Auto-disconnect after 3 min silence
-        await asyncio.sleep(180)
-        vc2 = music_vc.get(gid)
-        if vc2 and vc2.is_connected() and not vc2.is_playing():
-            try:
-                await vc2.disconnect()
-            except Exception:
-                pass
-            music_vc.pop(gid, None)
+        # Schedule auto-disconnect as a cancellable background task
+        task = asyncio.ensure_future(_auto_dc(guild, gid))
+        music_dc_tasks[gid] = task
         return
 
     track = q.pop(0)
     music_queues[gid] = q
     music_playing[gid] = track
 
-    # Resolve stream URL fresh (stream URLs expire)
-    info = await _yt_async(track.get("search_query") or track["title"])
+    # ── Resolve stream URL fresh (stream URLs expire quickly) ──────────────
+    query = track.get("webpage_url") or track.get("search_query") or track["title"]
+    info  = await _yt_async(query)
+
+    # Fallback: try search_query if webpage_url failed
+    if not info and track.get("search_query") and track.get("search_query") != query:
+        info = await _yt_async(track["search_query"])
+
     if not info:
-        await _play_next(guild)   # skip broken track
+        # Notify channel and skip to next track
+        ch = err_channel or track.get("np_channel")
+        if ch:
+            try:
+                await ch.send(embed=_e_error(
+                    "Track Unavailable",
+                    f"Couldn't load **{track['title'][:80]}** — it may be age-restricted, region-locked, or unavailable. Skipping."))
+            except Exception:
+                pass
+        await _play_next(guild, err_channel)
         return
 
+    # Update track with real info from yt-dlp
     track.update({
         "url":         info["url"],
-        "webpage_url": info.get("webpage_url", ""),
+        "webpage_url": info.get("webpage_url") or track.get("webpage_url", ""),
         "thumbnail":   track.get("album_art") or info.get("thumbnail", ""),
         "duration":    track.get("duration") or info.get("duration", 0),
-        "yt_title":    info.get("title", track["title"]),
+        # Only overwrite title if it was a placeholder URL
+        "title":       (info.get("title") or track["title"])
+                       if (track["title"] == "Loading..." or track["title"].startswith("http"))
+                       else track["title"],
     })
 
     vol = music_volume.get(gid, 1.0)
-    src = discord.PCMVolumeTransformer(
-        discord.FFmpegPCMAudio(info["url"], **FFMPEG_OPTS), volume=vol)
+    try:
+        src = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(track["url"], **FFMPEG_OPTS), volume=vol)
+    except Exception as ex:
+        ch = err_channel or track.get("np_channel")
+        if ch:
+            try:
+                await ch.send(embed=_e_error("Playback Error", f"FFmpeg failed: {ex}"))
+            except Exception:
+                pass
+        await _play_next(guild, err_channel)
+        return
 
     def _after(err):
         if err:
             print(f"[Music] Playback error in {guild.name}: {err}")
-        asyncio.run_coroutine_threadsafe(_play_next(guild), bot.loop)
+        asyncio.run_coroutine_threadsafe(_play_next(guild, err_channel), bot.loop)
 
     vc.play(src, after=_after)
 
-    # Set bot presence to show what's playing
+    # Update bot presence
     try:
         await bot.change_presence(activity=discord.Activity(
             type=discord.ActivityType.listening,
-            name=f"{track['title']}" + (f" · {track['artist']}" if track.get("artist") else "")))
+            name=track["title"] + (f" · {track['artist']}" if track.get("artist") else "")))
     except Exception:
         pass
 
-    # Post now-playing card in the channel the user used
-    np_ch = track.get("np_channel")
+    # Post now-playing card
+    np_ch = track.get("np_channel") or err_channel
     if np_ch:
         await _send_np(np_ch, track, gid)
 
@@ -4005,12 +4067,13 @@ async def music_play(interaction: discord.Interaction, song: str):
     if len(tracks) == 1:
         t = tracks[0]
         if vc.is_playing() or vc.is_paused():
-            # Add to queue
+            # Bot is already playing — add to queue
             q.append(t)
             pos = len(q)
+            display = t["title"] if not t["title"].startswith("http") else song[:60]
             e = discord.Embed(
                 title="➕  Added to Queue",
-                description=f"**{t['title']}**" + (f"\nby **{t['artist']}**" if t.get("artist") else ""),
+                description=f"**{display}**" + (f"\nby **{t['artist']}**" if t.get("artist") else ""),
                 color=C_SPOTIFY)
             if t.get("album_art"):
                 e.set_thumbnail(url=t["album_art"])
@@ -4021,13 +4084,16 @@ async def music_play(interaction: discord.Interaction, song: str):
             e.set_footer(text="TSR Music")
             await interaction.followup.send(embed=e)
         else:
+            # Nothing playing — send feedback immediately then start playback
             q.append(t)
             music_queues[gid] = q
-            await _play_next(interaction.guild)
+            display = t["title"] if not t["title"].startswith("http") else "your track"
             await interaction.followup.send(
                 embed=discord.Embed(
-                    description=f"🎵  Loading **{t['title']}**...",
+                    description=f"🎵  Loading **{display}**...",
                     color=C_SPOTIFY))
+            # _play_next fetches the stream URL, posts the now-playing card, and starts FFmpeg
+            await _play_next(interaction.guild, err_channel=interaction.channel)
     else:
         # Playlist / album — add all, start if idle
         q.extend(tracks)
@@ -4044,7 +4110,7 @@ async def music_play(interaction: discord.Interaction, song: str):
         e.set_footer(text="TSR Music  •  First track will play momentarily")
         await interaction.followup.send(embed=e)
         if not vc.is_playing() and not vc.is_paused():
-            await _play_next(interaction.guild)
+            await _play_next(interaction.guild, err_channel=interaction.channel)
 
 # ── /pause ────────────────────────────────────────────────────────────────
 
@@ -4221,6 +4287,7 @@ async def music_shuffle(interaction: discord.Interaction):
 async def music_disconnect(interaction: discord.Interaction):
     gid = str(interaction.guild.id)
     vc  = music_vc.get(gid)
+    await _cancel_dc_task(gid)
     music_queues[gid]  = []
     music_playing[gid] = None
     music_loop[gid]    = False
