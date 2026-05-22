@@ -62,8 +62,8 @@ CMD_GROUPS = {
                    "clearwarnings","delwarn","purge","slowmode","nick","role",
                    "softban","tempban","hardban","hardban_id","unhardban","hardbans",
                    "vcmute","vcunmute","deafen","undeafen","move","massrole",
-                   "banlist","lock","unlock","lockdown","endlockdown","closeticket",
-                   "mmclose","mmreply","modlogs","note","notes","massban","case"],
+                   "lock","unlock","lockdown","endlockdown","closeticket",
+                   "mmclose","mmreply","modlogs","note","massban","case"],
     "utility":    ["userinfo","serverinfo","roleinfo","channelinfo","avatar","banner",
                    "ping","stats","snipe","editsnipe","say","embed","announce","poll",
                    "multipoll","inviteinfo","inviteleaderboard"],
@@ -2875,16 +2875,6 @@ async def move(interaction: discord.Interaction, member: discord.Member, channel
     await member.move_to(channel)
     await interaction.response.send_message(embed=_e_success("Moved",f"{member.mention} moved to **{channel.name}**."))
 
-@bot.tree.command(name="banlist", description="View banned users")
-@app_commands.default_permissions(ban_members=True)
-async def banlist(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    bans = [entry async for entry in interaction.guild.bans()]
-    if not bans: return await interaction.followup.send(embed=_e_info("Ban List","No banned users."), ephemeral=True)
-    e = discord.Embed(title=f"🔨  Ban List ({len(bans)})", color=C_RED)
-    e.description = "\n".join(f"`{b.user.id}` — **{b.user}** — {b.reason or 'No reason'}" for b in bans[:20])
-    if len(bans) > 20: e.set_footer(text=f"Showing 20 of {len(bans)}")
-    await interaction.followup.send(embed=e, ephemeral=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  GIVEAWAY SYSTEM
@@ -3382,7 +3372,7 @@ async def help_cmd(interaction: discord.Interaction):
     ), inline=True)
     e.add_field(name="⚡  Advanced Mod", value=(
         "`/hardban` `/hardban_id` `/unhardban` `/hardbans`\n"
-        "`/softban` `/tempban` `/banlist`\n"
+        "`/softban` `/tempban` `/massban`\n"
         "`/massrole` `/vcmute` `/vcunmute`\n"
         "`/deafen` `/undeafen` `/move`\n"
         "`/lock` `/unlock` `/lockdown` `/endlockdown`"
@@ -4566,31 +4556,6 @@ async def cmd_note(interaction: discord.Interaction,
     e.set_footer(text=f"{len(notes)} note(s)  •  Staff only — not visible to users")
     await interaction.response.send_message(embed=e, ephemeral=True)
 
-# ── /notes alias ──────────────────────────────────────────────────────────
-
-@bot.tree.command(name="notes", description="View all staff notes on a user (shortcut for /note list)")
-@app_commands.describe(user="The user to check notes for")
-async def cmd_notes(interaction: discord.Interaction, user: discord.User):
-    if not await has_cmd_perm(interaction, "notes"):
-        return await interaction.response.send_message(
-            embed=_e_error("No Permission", "You need moderation permissions."), ephemeral=True)
-    gid   = str(interaction.guild.id)
-    notes = note_db.get(gid, {}).get(str(user.id), [])
-    if not notes:
-        return await interaction.response.send_message(
-            embed=discord.Embed(
-                title=f"📝  Notes — {user}",
-                description="No notes on this user.",
-                color=C_GREEN), ephemeral=True)
-    e = discord.Embed(title=f"📝  Notes — {user}", colour=C_YELLOW)
-    e.set_thumbnail(url=user.display_avatar.url)
-    lines = []
-    for i, n in enumerate(notes, 1):
-        ts  = f"<t:{n['ts']}:d>" if n.get("ts") else "?"
-        lines.append(f"`{i}.` {n['text'][:120]}\n    — {n['author']} on {ts}")
-    e.description = "\n\n".join(lines)
-    e.set_footer(text=f"{len(notes)} note(s)")
-    await interaction.response.send_message(embed=e, ephemeral=True)
 
 # ── /massban ──────────────────────────────────────────────────────────────
 
