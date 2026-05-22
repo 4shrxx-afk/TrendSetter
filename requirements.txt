@@ -1,4 +1,6 @@
-# Discord bot dependencies
 discord.py==2.3.2
-audioop-lts       # fixes "No module named audioop" on Python 3.13
+audioop-lts
 aiohttp==3.10.5
+yt-dlp
+PyNaCl
+spotipy

@@ -1,7 +1,9 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════╗
-║            TSR ADVANCED DISCORD BOT  ·  v3.0                            ║
+║            TSR ADVANCED DISCORD BOT  ·  v4.0                            ║
 ║  Moderation · ModMail · Tickets · AutoMod · Anti-Nuke · Giveaways       ║
+║  Honeypot · Invite Tracking · Stats Channels · Roblox Watcher v4        ║
+║  Music (Spotify-style) · play/pause/skip/queue/loop/shuffle/volume       ║
 ║  Verification · Comprehensive Logging · AFK · Levels · Reminders        ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
@@ -12,8 +14,21 @@ All guild data is stored in the data/ folder (JSON files).
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import datetime, asyncio, random, re, os, json, string, aiohttp, io
+import datetime, asyncio, random, re, os, json, string, aiohttp, io, math
 from typing import Optional
+
+try:
+    import yt_dlp
+    YT_DLP_OK = True
+except ImportError:
+    YT_DLP_OK = False
+
+try:
+    import spotipy
+    from spotipy.oauth2 import SpotifyClientCredentials
+    SPOTIPY_OK = True
+except ImportError:
+    SPOTIPY_OK = False
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  CONFIG
@@ -48,15 +63,19 @@ CMD_GROUPS = {
                    "softban","tempban","hardban","hardban_id","unhardban","hardbans",
                    "vcmute","vcunmute","deafen","undeafen","move","massrole",
                    "banlist","lock","unlock","lockdown","endlockdown","closeticket",
-                   "mmclose","mmreply"],
+                   "mmclose","mmreply","modlogs","note","notes","massban","case"],
     "utility":    ["userinfo","serverinfo","roleinfo","channelinfo","avatar","banner",
-                   "ping","stats","snipe","editsnipe","say","embed","announce","poll","multipoll"],
+                   "ping","stats","snipe","editsnipe","say","embed","announce","poll",
+                   "multipoll","inviteinfo","inviteleaderboard"],
+    "music":      ["play","pause","resume","skip","stop","nowplaying","queue",
+                   "volume","loop","shuffle","disconnect","search"],
     "community":  ["suggest","rank","leaderboard","afk","remind","8ball","coinflip",
                    "roll","choose","giveaway","greroll","gend","verify","getcode"],
     "setup":      ["setuplog","setupwelcome","setupgoodbye","setuplock","setupverify",
                    "setuptickets","setupautomod","setupmodmail","setuplevels",
-                   "setupsuggestions","setuproblox","setupantinuke","badword",
-                   "filterlist","setpermission","viewpermissions","help"],
+                   "setupsuggestions","setuproblox","setupantinuke","setuphoneypot",
+                   "setupstatschannels","setupmusic","antiraid","warnthreshold",
+                   "badword","filterlist","setpermission","viewpermissions","help"],
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -89,7 +108,10 @@ suggestions_db= load_json("suggestions.json")
 roblox_db     = load_json("roblox.json")
 modmail_db    = load_json("modmail.json")
 cmd_perms_db  = load_json("cmd_perms.json")   # {gid: {cmd_group: [role_ids]}}
-antinuke_db   = load_json("antinuke.json")    # {gid: {uid: {action: [timestamps]}}}
+antinuke_db   = load_json("antinuke.json")
+invite_db     = load_json("invite_db.json")   # {gid: {inviter_id: {uses, members[]}}}
+note_db       = load_json("note_db.json")     # {gid: {uid: [{text, author, ts}]}}
+cases_db      = load_json("cases_db.json")    # {gid: [case dicts]}
 
 snipe_db:      dict = {}
 editsnipe_db:  dict = {}
@@ -99,6 +121,9 @@ ANTISPAM_WINDOW = 5
 
 # Anti-nuke tracking (in-memory, reset each run is fine)
 nuke_tracker: dict = {}   # {gid: {uid: {action: [ts, ts, ...]}}}
+
+# Invite cache: {gid: {code: uses}} — used to detect which invite was used on join
+invite_cache: dict = {}
 
 # Pending verification codes / math CAPTCHAs
 pending_codes:  dict = {}   # uid -> code
@@ -119,31 +144,71 @@ _DEFAULTS = {
     "goodbye_message": "**{user}** has left the server. Goodbye!",
     "verify_channel": None, "verify_role": None, "verify_method": "button",
     "verify_message": "Click **Verify Me** to gain access to the server.",
-    "verify_min_age_days": 0,        # account must be X days old
-    "verify_require_phone": False,   # require phone-verified Discord account
+    "verify_min_age_days": 0,
+    "verify_require_phone": False,
     "lock_exempt_roles": [], "lock_deny_perm": "send_messages",
-    "automod_links": False, "automod_caps": False,
-    "automod_caps_pct": 80, "automod_caps_min": 10, "automod_badwords": [],
+    # AutoMod (v4 expanded)
+    "automod_links": False,
+    "automod_caps": False,
+    "automod_caps_pct": 80, "automod_caps_min": 10,
+    "automod_badwords": [],
     "automod_exempt_roles": [],
+    "automod_invites": False,           # block Discord server invites (discord.gg)
+    "automod_mentions": False,          # block excessive @mentions
+    "automod_mentions_limit": 5,        # max @mentions per message
+    "automod_emojis": False,            # block emoji spam
+    "automod_emojis_limit": 10,         # max emojis per message
+    "automod_zalgo": False,             # block zalgo/unicode pollution text
+    "automod_repeated_chars": False,    # block e.g. "aaaaaaaaa" runs
+    "automod_repeated_limit": 8,        # char run length to trigger
+    "automod_mass_caps_bypass": False,  # detect l33tspeak caps bypass (HeLLo)
+    # Honeypot
+    "honeypot_channels": [],            # list of channel IDs — anyone who types here gets actioned
+    "honeypot_action": "softban",       # softban | ban | kick | timeout
+    "honeypot_log": True,
+    # Stats channels (voice channels with auto-updating names)
+    "stat_ch_members": None,
+    "stat_ch_online": None,
+    "stat_ch_bots": None,
+    "stat_ch_channels": None,
+    "stat_ch_roles": None,
+    # Tickets
     "ticket_channel": None, "ticket_category": None,
     "ticket_support_role": None, "ticket_transcript_channel": None,
     "ticket_message": "Click the button below to open a support ticket.",
     "ticket_count": 0,
+    # ModMail
     "modmail_channel": None, "modmail_category": None, "modmail_log_channel": None,
     "suggestion_channel": None,
     "level_channel": None,
     "level_up_msg": "{user} levelled up to **Level {level}**! 🎉",
-    "roblox_channel": None, "roblox_last_version": None,
+    # Roblox watcher (v4)
+    "roblox_channel": None,
+    "roblox_ping_role": None,           # role ID to ping on live update
+    "roblox_future_ping_role": None,    # role ID to ping on future update
+    "roblox_last_player_version": None,
+    "roblox_last_studio_version": None,
     # Anti-nuke
     "antinuke_enabled": False,
-    "antinuke_threshold_bans": 3,       # X bans in Y seconds = nuke
+    "antinuke_threshold_bans": 3,
     "antinuke_threshold_kicks": 5,
     "antinuke_threshold_channels": 3,
     "antinuke_threshold_roles": 3,
     "antinuke_threshold_webhooks": 3,
-    "antinuke_window": 10,              # seconds
-    "antinuke_action": "strip",         # strip | ban | kick
-    "antinuke_whitelist": [],           # role IDs immune to anti-nuke
+    "antinuke_anti_everyone": True,
+    "antinuke_window": 10,
+    "antinuke_action": "strip",
+    "antinuke_whitelist": [],
+    # Anti-Raid
+    "antiraid_enabled": False,
+    "antiraid_min_age_days": 7,
+    "antiraid_action": "kick",          # kick | ban | timeout
+    "antiraid_dm": True,
+    # Auto-warn escalation
+    "warn_thresholds": {},              # {"3": "timeout_1h", "5": "kick", "7": "ban"}
+    # Music channel lock
+    "music_channel": None,             # voice channel ID the bot should always stay in
+    "music_auto_rejoin": True,         # auto-rejoin music_channel if kicked
 }
 
 def gcfg(guild_id: int) -> dict:
@@ -392,6 +457,13 @@ def is_automod_exempt(member: discord.Member) -> bool:
     return (member.guild_permissions.manage_messages or
             any(r in roles for r in cfg.get("automod_exempt_roles", [])))
 
+def is_whitelisted(member: discord.Member, cfg: dict) -> bool:
+    """Check if a member is on the anti-nuke whitelist."""
+    if member.guild_permissions.administrator:
+        return True
+    roles = [str(r.id) for r in member.roles]
+    return any(r in roles for r in cfg.get("antinuke_whitelist", []))
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  ANTI-NUKE ENGINE
 # ═══════════════════════════════════════════════════════════════════════════
@@ -439,42 +511,65 @@ async def antinuke_check(guild: discord.Guild, user_id: int, action: str) -> boo
         return True
     return False
 
-async def _trigger_antinuke(guild: discord.Guild, user_id: int, action: str, count: int):
+async def _trigger_antinuke(guild: discord.Guild, user_id: int, action: str, count: int,
+                            reason: str = None, mode: str = "Enhanced"):
     cfg    = gcfg(guild.id)
     nk_act = cfg.get("antinuke_action", "strip")
     member = guild.get_member(user_id)
 
-    log_e = discord.Embed(
-        title="🚨  ANTI-NUKE TRIGGERED",
-        color=C_RED,
-        description=(
-            f"```diff\n"
-            f"- NUKE ACTION DETECTED\n"
-            f"  Action   : {action.upper().replace('_',' ')}\n"
-            f"  Count    : {count} in {cfg.get('antinuke_window',10)}s\n"
-            f"  User     : {user_id}\n"
-            f"  Response : {nk_act.upper()}\n"
-            f"```"
-        )
-    )
-    log_e.add_field(name="⚡  Action Detected", value=action.replace("_", " ").title(), inline=True)
-    log_e.add_field(name="🔢  Count",           value=str(count),                       inline=True)
-    log_e.add_field(name="👤  Perpetrator",     value=f"<@{user_id}> (`{user_id}`)",   inline=True)
-    log_e.add_field(name="🛡️  Response",        value=nk_act.title(),                  inline=True)
+    action_label = {
+        "ban": "Mass Ban",
+        "kick": "Mass Kick",
+        "channel_delete": "Mass Channel Delete",
+        "role_delete": "Mass Role Delete",
+        "webhook_create": "Mass Webhook Create",
+        "everyone_ping": "Anti Everyone",
+    }.get(action, action.replace("_"," ").title())
+
+    reason_label = reason or {
+        "ban": f"Performed {count} bans in {cfg.get('antinuke_window',10)}s",
+        "kick": f"Performed {count} kicks in {cfg.get('antinuke_window',10)}s",
+        "channel_delete": f"Deleted {count} channels in {cfg.get('antinuke_window',10)}s",
+        "role_delete": f"Deleted {count} roles in {cfg.get('antinuke_window',10)}s",
+        "webhook_create": f"Created {count} webhooks in {cfg.get('antinuke_window',10)}s",
+        "everyone_ping": "Unauthorized @everyone/@here ping",
+    }.get(action, "Automated anti-nuke response")
+
+    # Determine what roles were stripped for the action field
+    removable = []
+    action_taken_str = nk_act.title()
+    if member and nk_act in ("strip", "strip+ban"):
+        removable = [r for r in member.roles if not r.is_default() and not r.managed and r < guild.me.top_role]
+        stripped_names = ", ".join(r.name for r in removable[:6])
+        if len(removable) > 6:
+            stripped_names += f" +{len(removable)-6} more"
+        action_taken_str = f"Removed {len(removable)} role(s) [{stripped_names}]"
+        if nk_act in ("strip+ban", "ban"):
+            action_taken_str += " + Banned"
+
+    # Build embed matching the screenshot style
+    log_e = discord.Embed(color=C_RED)
+    log_e.set_author(name="✅  AntiNuke Action", icon_url=guild.icon.url if guild.icon else None)
+    log_e.add_field(name="Event Type",  value=f"`{action_label}`",     inline=True)
+    log_e.add_field(name="Mode",        value=f"`{mode}`",              inline=True)
+    log_e.add_field(name="Action",      value=action_taken_str,         inline=False)
+    log_e.add_field(name="Executor",
+                    value=f"<@{user_id}> (`{user_id}`)",               inline=False)
+    log_e.add_field(name="Reason",      value=reason_label,             inline=False)
+    log_e.set_footer(text=f"Guild ID: {guild.id}")
     log_e.timestamp = now_utc()
-    log_e.set_footer(text="TSR Anti-Nuke System")
     await send_log(guild, log_e)
 
     # DM owner
     if guild.owner:
         dm_e = discord.Embed(
-            title="🚨  Anti-Nuke Alert — Action Required",
+            title="🚨  Anti-Nuke Alert",
             description=(
-                f"**A nuke attempt was detected in {guild.name}!**\n\n"
+                f"**Threat detected in {guild.name}**\n\n"
+                f"**Type:** `{action_label}`\n"
                 f"**User:** <@{user_id}> (`{user_id}`)\n"
-                f"**Action:** {action.replace('_',' ').title()}\n"
-                f"**Count:** {count}\n"
-                f"**Bot Response:** {nk_act.title()}"
+                f"**Reason:** {reason_label}\n"
+                f"**Action taken:** {action_taken_str}"
             ),
             color=C_RED
         )
@@ -484,21 +579,25 @@ async def _trigger_antinuke(guild: discord.Guild, user_id: int, action: str, cou
     if not member:
         return
 
-    if nk_act == "strip":
-        # Remove all roles except @everyone and managed roles
-        removable = [r for r in member.roles if not r.is_default() and not r.managed and r < guild.me.top_role]
-        try:
-            await member.remove_roles(*removable, reason="Anti-Nuke: Role strip")
-        except Exception:
-            pass
+    if nk_act in ("strip", "strip+ban"):
+        if removable:
+            try:
+                await member.remove_roles(*removable, reason=f"Anti-Nuke: {reason_label}")
+            except Exception:
+                pass
+        if nk_act == "strip+ban":
+            try:
+                await member.ban(reason=f"Anti-Nuke: {reason_label}", delete_message_days=0)
+            except Exception:
+                pass
     elif nk_act == "kick":
         try:
-            await member.kick(reason="Anti-Nuke: Auto-kick")
+            await member.kick(reason=f"Anti-Nuke: {reason_label}")
         except Exception:
             pass
     elif nk_act == "ban":
         try:
-            await member.ban(reason="Anti-Nuke: Auto-ban", delete_message_days=0)
+            await member.ban(reason=f"Anti-Nuke: {reason_label}", delete_message_days=0)
         except Exception:
             pass
 
@@ -516,13 +615,22 @@ async def on_ready():
     bot.add_view(TicketCloseView())
     bot.add_view(GiveawayView())
     bot.add_view(SuggestionVoteView())
+    # Cache all guild invites for invite tracking
+    for guild in bot.guilds:
+        try:
+            invites = await guild.invites()
+            invite_cache[str(guild.id)] = {inv.code: inv.uses for inv in invites}
+        except Exception:
+            invite_cache[str(guild.id)] = {}
     status_loop.start()
     check_tempbans.start()
     check_reminders.start()
     check_roblox.start()
+    update_stat_channels.start()
     print(f"\n{'═'*55}")
-    print(f"  🤖  Online: {bot.user} (v3.0)")
-    print(f"  Servers: {len(bot.guilds)}")
+    print(f"  🤖  Online: {bot.user} (v4.0)")
+    print(f"  Servers : {len(bot.guilds)}")
+    print(f"  Invites : cached for {len(invite_cache)} guilds")
     print(f"{'═'*55}\n")
 
 @tasks.loop(seconds=30)
@@ -582,40 +690,135 @@ async def check_reminders():
         reminders_db.clear(); reminders_db.extend(remaining)
         save_json("reminders.json", reminders_db)
 
-@tasks.loop(minutes=5)
-async def check_roblox():
-    url = "https://clientsettingscdn.roblox.com/v2/client-version/WindowsPlayer"
+async def _fetch_roblox_version(platform: str) -> Optional[str]:
+    """Fetch current version hash from Roblox clientsettings CDN."""
+    url = f"https://clientsettingscdn.roblox.com/v2/client-version/{platform}"
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status != 200: return
-                data    = await r.json()
-                version = data.get("clientVersionUpload") or data.get("version")
-    except Exception: return
+                if r.status != 200:
+                    return None
+                data = await r.json()
+                return data.get("clientVersionUpload") or data.get("version")
+    except Exception:
+        return None
+
+@tasks.loop(minutes=3)
+async def check_roblox():
+    """
+    Roblox Update Watcher v4
+    - WindowsPlayer = the live version players use
+    - WindowsStudio  = ahead of player — signals a future/pending update
+    When Studio has a newer version than Player → "Future Update" (yellow warning)
+    When Player version changes               → "Live Update"   (red siren)
+    """
+    player_ver = await _fetch_roblox_version("WindowsPlayer")
+    studio_ver = await _fetch_roblox_version("WindowsStudio64")
+
+    if not player_ver:
+        return
+
+    now_ts = now_utc()
+    date_str = now_ts.strftime("%A, %B %d, %Y %I:%M %p")
+    short_ts = now_ts.strftime("%m/%d/%Y %I:%M %p")
+
     for gid, cfg in guild_config.items():
-        ch_id   = cfg.get("roblox_channel")
-        if not ch_id: continue
-        stored  = cfg.get("roblox_last_version")
-        if stored and stored != version:
-            guild = bot.get_guild(int(gid))
-            if guild:
-                ch = guild.get_channel(int(ch_id))
-                if ch:
-                    e = discord.Embed(
-                        title="🎮  Roblox Update Detected!",
-                        description=(
-                            f"Roblox has pushed a new client update.\n\n"
-                            f"**Previous:** `{stored}`\n"
-                            f"**New version:** `{version}`\n\n"
-                            f"> The game may be temporarily unavailable during rollout."
-                        ),
-                        color=C_ORANGE
-                    )
-                    e.timestamp = now_utc()
-                    e.set_footer(text="TSR Roblox Watcher")
-                    await ch.send(embed=e)
-        cfg["roblox_last_version"] = version
+        ch_id = cfg.get("roblox_channel")
+        if not ch_id:
+            continue
+        guild = bot.get_guild(int(gid))
+        if not guild:
+            continue
+        ch = guild.get_channel(int(ch_id))
+        if not ch:
+            continue
+
+        stored_player = cfg.get("roblox_last_player_version")
+        stored_studio = cfg.get("roblox_last_studio_version")
+
+        ping_role_id        = cfg.get("roblox_ping_role")
+        future_ping_role_id = cfg.get("roblox_future_ping_role")
+
+        # ── Future update: studio has a version the player doesn't have yet ──
+        if studio_ver and studio_ver != player_ver and studio_ver != stored_studio:
+            ping_content = None
+            if future_ping_role_id:
+                r = guild.get_role(int(future_ping_role_id))
+                if r:
+                    ping_content = r.mention
+            e = discord.Embed(
+                title="⚠️  A Future Roblox Update Has Been Detected!",
+                description="This is a future update, it has not yet reached the Windows Player.",
+                color=C_YELLOW
+            )
+            e.add_field(name="**Platform**",      value="Windows Studio (Pre-release)", inline=False)
+            e.add_field(name="**Version Hash**",  value=f"`{studio_ver}`",              inline=False)
+            e.add_field(name="**Date**",          value=f"{date_str}\n\n{short_ts}",    inline=False)
+            dl_url = f"https://setup.rbxcdn.com/{studio_ver}-RobloxStudioLauncher.exe"
+            e.add_field(name="**Download**",      value=f"[Click to download]({dl_url})", inline=False)
+            e.set_footer(text="TSR Roblox Watcher v4  •  Future update — not live yet")
+            e.timestamp = now_ts
+            try:
+                await ch.send(content=ping_content, embed=e)
+            except Exception:
+                pass
+            cfg["roblox_last_studio_version"] = studio_ver
+
+        # ── Live update: player version changed ──
+        if stored_player and stored_player != player_ver:
+            ping_content = None
+            if ping_role_id:
+                r = guild.get_role(int(ping_role_id))
+                if r:
+                    ping_content = r.mention
+            e = discord.Embed(
+                title="🚨  Roblox Update Detected!",
+                description="This is a **live update** — all Windows Player clients will update shortly.",
+                color=C_RED
+            )
+            e.add_field(name="**Platform**",      value="Windows Player (Live)",        inline=False)
+            e.add_field(name="**Version Hash**",  value=f"`{player_ver}`",              inline=False)
+            e.add_field(name="**Date**",          value=f"{date_str}\n\n{short_ts}",    inline=False)
+            dl_url = f"https://setup.rbxcdn.com/{player_ver}-RobloxPlayerLauncher.exe"
+            e.add_field(name="**Download**",      value=f"[Click to download]({dl_url})", inline=False)
+            e.set_footer(text="TSR Roblox Watcher v4  •  Live update detected")
+            e.timestamp = now_ts
+            try:
+                await ch.send(content=ping_content, embed=e)
+            except Exception:
+                pass
+
+        # Always update stored player version
+        cfg["roblox_last_player_version"] = player_ver
+        if studio_ver:
+            cfg["roblox_last_studio_version"] = studio_ver
+
     save_cfg()
+
+@tasks.loop(minutes=10)
+async def update_stat_channels():
+    """Auto-update voice channel name stats every 10 minutes."""
+    for gid, cfg in guild_config.items():
+        guild = bot.get_guild(int(gid))
+        if not guild:
+            continue
+        stats = {
+            "stat_ch_members":  f"👥 Members: {guild.member_count:,}",
+            "stat_ch_online":   f"🟢 Online: {sum(1 for m in guild.members if m.status != discord.Status.offline and not m.bot):,}",
+            "stat_ch_bots":     f"🤖 Bots: {sum(1 for m in guild.members if m.bot):,}",
+            "stat_ch_channels": f"💬 Channels: {len(guild.channels):,}",
+            "stat_ch_roles":    f"🎭 Roles: {len(guild.roles):,}",
+        }
+        for key, name in stats.items():
+            ch_id = cfg.get(key)
+            if not ch_id:
+                continue
+            ch = guild.get_channel(int(ch_id))
+            if ch and ch.name != name:
+                try:
+                    await ch.edit(name=name)
+                except Exception:
+                    pass
 
 # ── Member Events ──────────────────────────────────────────────────────────
 
@@ -634,6 +837,61 @@ async def on_member_join(member: discord.Member):
         await member.ban(reason=f"Hardban: {hb.get('reason','')}", delete_message_days=0)
         return
 
+    # ── Anti-Raid: new account gate ────────────────────────────────────────
+    cfg_join = gcfg(member.guild.id)
+    if cfg_join.get("antiraid_enabled"):
+        min_days   = cfg_join.get("antiraid_min_age_days", 7)
+        acct_age   = (datetime.datetime.utcnow() - member.created_at.replace(tzinfo=None)).days
+        if acct_age < min_days:
+            ar_act = cfg_join.get("antiraid_action", "kick")
+            reason = f"Anti-Raid: Account is {acct_age}d old (minimum {min_days}d)"
+            if cfg_join.get("antiraid_dm", True):
+                try:
+                    await member.send(embed=discord.Embed(
+                        title=f"🛡️  Blocked from {member.guild.name}",
+                        description=f"Your account is too new to join.\n**Reason:** {reason}",
+                        color=C_ORANGE))
+                except Exception: pass
+            try:
+                if ar_act == "kick":
+                    await member.kick(reason=reason)
+                elif ar_act == "ban":
+                    await member.ban(reason=reason, delete_message_days=0)
+                elif ar_act == "timeout":
+                    await member.timeout(datetime.timedelta(hours=24), reason=reason)
+            except Exception: pass
+            await send_log(member.guild, _log_embed(
+                "🛡️  Anti-Raid Triggered", C_ORANGE, icon="🛡️",
+                thumbnail=member.display_avatar.url,
+                fields=[
+                    ("👤  User",    f"{member.mention} `{member.id}`", True),
+                    ("📅  Age",     f"{acct_age} day(s)",              True),
+                    ("⚡  Action",  ar_act.title(),                    True),
+                ]
+            ))
+            return
+
+    # ── Invite tracking ────────────────────────────────────────────────────
+    used_invite = None
+    used_inviter = None
+    try:
+        invites_after = await member.guild.invites()
+        old_cache = invite_cache.get(gid, {})
+        for inv in invites_after:
+            if inv.uses > old_cache.get(inv.code, 0):
+                used_invite = inv
+                used_inviter = inv.inviter
+                break
+        invite_cache[gid] = {inv.code: inv.uses for inv in invites_after}
+        if used_inviter:
+            inv_gid = invite_db.setdefault(gid, {})
+            inv_uid = inv_gid.setdefault(str(used_inviter.id), {"uses": 0, "members": []})
+            inv_uid["uses"] += 1
+            inv_uid["members"].append(uid)
+            save_json("invite_db.json", invite_db)
+    except Exception:
+        pass
+
     cfg   = gcfg(member.guild.id)
     ch_id = cfg.get("welcome_channel")
     if ch_id:
@@ -649,17 +907,21 @@ async def on_member_join(member: discord.Member):
             e.set_thumbnail(url=member.display_avatar.url)
             e.add_field(name="📅  Account Age", value=f"<t:{int(member.created_at.timestamp())}:R>", inline=True)
             e.add_field(name="👥  Member #",    value=str(member.guild.member_count), inline=True)
+            if used_inviter:
+                e.add_field(name="📨  Invited By", value=f"{used_inviter.mention} (`{used_invite.code}`)", inline=True)
             e.set_footer(text="TSR Bot  •  Member Join")
             e.timestamp = now_utc()
             await ch.send(embed=e)
 
+    invite_field = f"{used_inviter.mention} via `{used_invite.code}`" if used_inviter else "Unknown"
     await send_log(member.guild, _log_embed(
         "Member Joined", C_GREEN, icon="📥",
         thumbnail=member.display_avatar.url,
         fields=[
-            ("👤  User",          f"{member.mention}\n`{member}` • `{member.id}`", True),
-            ("📅  Account Created", f"<t:{int(member.created_at.timestamp())}:R>", True),
-            ("👥  Total Members",   str(member.guild.member_count),                True),
+            ("👤  User",           f"{member.mention}\n`{member}` • `{member.id}`",  True),
+            ("📅  Account Created", f"<t:{int(member.created_at.timestamp())}:R>",   True),
+            ("👥  Total Members",   str(member.guild.member_count),                  True),
+            ("📨  Invited By",      invite_field,                                    True),
         ]
     ))
 
@@ -814,18 +1076,25 @@ async def on_guild_role_update(before: discord.Role, after: discord.Role):
 
 @bot.event
 async def on_invite_create(invite: discord.Invite):
+    # Update cache
+    gid = str(invite.guild.id)
+    invite_cache.setdefault(gid, {})[invite.code] = invite.uses
     await send_log(invite.guild, _log_embed(
         "Invite Created", C_TEAL, icon="🔗",
         fields=[
-            ("🔗  Code",    f"`{invite.code}`",                           True),
-            ("👤  Creator", f"{invite.inviter.mention if invite.inviter else 'Unknown'}", True),
-            ("📌  Channel", invite.channel.mention if invite.channel else "?", True),
-            ("🔢  Max Uses", str(invite.max_uses) if invite.max_uses else "∞", True),
+            ("🔗  Code",     f"`{invite.code}`",                                          True),
+            ("👤  Creator",  f"{invite.inviter.mention if invite.inviter else 'Unknown'}", True),
+            ("📌  Channel",  invite.channel.mention if invite.channel else "?",            True),
+            ("🔢  Max Uses", str(invite.max_uses) if invite.max_uses else "∞",            True),
+            ("⏱️  Expires",  f"<t:{int((now_utc()+datetime.timedelta(seconds=invite.max_age)).timestamp())}:R>" if invite.max_age else "Never", True),
         ]
     ))
 
 @bot.event
 async def on_invite_delete(invite: discord.Invite):
+    # Update cache
+    gid = str(invite.guild.id)
+    invite_cache.get(gid, {}).pop(invite.code, None)
     await send_log(invite.guild, _log_embed(
         "Invite Deleted", C_ORANGE, icon="🚫",
         fields=[("🔗  Code", f"`{invite.code}`", True)]
@@ -993,9 +1262,64 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    # ── Honeypot check ─────────────────────────────────────────────────────
+    honeypot_channels = [str(c) for c in cfg.get("honeypot_channels", [])]
+    _hp_exempt = (message.author.guild_permissions.administrator or
+                  message.author.guild_permissions.ban_members or
+                  message.author.guild_permissions.manage_guild)
+    if honeypot_channels and str(message.channel.id) in honeypot_channels and not _hp_exempt:
+        hp_action = cfg.get("honeypot_action", "softban")
+        reason    = f"Honeypot channel triggered (#{message.channel.name})"
+        try: await message.delete()
+        except Exception: pass
+        if hp_action == "softban":
+            try:
+                await message.guild.ban(message.author, reason=reason, delete_message_days=1)
+                await message.guild.unban(message.author, reason="Softban cleanup")
+            except Exception: pass
+        elif hp_action == "ban":
+            try: await message.guild.ban(message.author, reason=reason, delete_message_days=0)
+            except Exception: pass
+        elif hp_action == "kick":
+            try: await message.author.kick(reason=reason)
+            except Exception: pass
+        elif hp_action == "timeout":
+            try: await message.author.timeout(datetime.timedelta(hours=24), reason=reason)
+            except Exception: pass
+        if cfg.get("honeypot_log", True):
+            await send_log(message.guild, _log_embed(
+                "🍯  Honeypot Triggered", C_RED, icon="🍯",
+                thumbnail=message.author.display_avatar.url,
+                fields=[
+                    ("👤  User",    f"{message.author.mention} `{message.author.id}`", True),
+                    ("📂  Channel", message.channel.mention,                           True),
+                    ("⚡  Action",  hp_action.title(),                                 True),
+                    ("📝  Content", f"```{message.content[:300] or '(no text)'}```",   False),
+                ]
+            ))
+        await bot.process_commands(message)
+        return
+
+    # ── Anti-nuke: @everyone/@here detection ───────────────────────────────
+    if (cfg.get("antinuke_enabled") and cfg.get("antinuke_anti_everyone", True)
+            and (message.mention_everyone)
+            and not is_whitelisted(message.author, cfg)):
+        # Check if user has Mention Everyone permission from roles
+        has_perm = (message.author.guild_permissions.mention_everyone or
+                    message.author.guild_permissions.administrator)
+        if not has_perm:
+            await _trigger_antinuke(message.guild, message.author.id, "everyone_ping", 1,
+                                    reason="Unauthorized @everyone/@here ping")
+            try: await message.delete()
+            except Exception: pass
+            await bot.process_commands(message)
+            return
+
     if not is_automod_exempt(message.author):
+        content = message.content
+
         # Anti-links
-        if cfg.get("automod_links") and re.search(r"(https?://|discord\.gg/|www\.)", message.content, re.I):
+        if cfg.get("automod_links") and re.search(r"(https?://|discord\.gg/|www\.)", content, re.I):
             try: await message.delete()
             except Exception: pass
             await message.channel.send(
@@ -1009,15 +1333,130 @@ async def on_message(message: discord.Message):
                 fields=[
                     ("👤  User",    f"{message.author.mention}", True),
                     ("📂  Channel", message.channel.mention,     True),
-                    ("📝  Content", f"```{message.content[:300]}```", False),
+                    ("📝  Content", f"```{content[:300]}```",    False),
                 ]
             ))
             await bot.process_commands(message)
             return
 
+        # Anti-invites (discord.gg links)
+        if cfg.get("automod_invites") and re.search(r"discord\.(gg|com/invite)/[a-zA-Z0-9-]+", content, re.I):
+            try: await message.delete()
+            except Exception: pass
+            await message.channel.send(
+                embed=discord.Embed(title="🚫  Invites Blocked",
+                                    description=f"{message.author.mention}, Discord server invites are not allowed here.",
+                                    color=C_RED),
+                delete_after=6)
+            await send_log(message.guild, _log_embed(
+                "AutoMod: Invite Blocked", C_RED, icon="📩",
+                thumbnail=message.author.display_avatar.url,
+                fields=[
+                    ("👤  User",    f"{message.author.mention}", True),
+                    ("📂  Channel", message.channel.mention,     True),
+                    ("📝  Content", f"```{content[:200]}```",    False),
+                ]
+            ))
+            await bot.process_commands(message)
+            return
+
+        # Anti-mentions
+        if cfg.get("automod_mentions"):
+            mention_count = len(message.mentions) + len(message.role_mentions)
+            if mention_count > cfg.get("automod_mentions_limit", 5):
+                try: await message.delete()
+                except Exception: pass
+                try: await message.author.timeout(datetime.timedelta(minutes=5), reason="AutoMod: Mass mentions")
+                except Exception: pass
+                await message.channel.send(
+                    embed=discord.Embed(title="🚫  Too Many Mentions",
+                                        description=f"{message.author.mention}, you mentioned {mention_count} users/roles at once.",
+                                        color=C_RED),
+                    delete_after=6)
+                await send_log(message.guild, _log_embed(
+                    "AutoMod: Mass Mention", C_RED, icon="@",
+                    thumbnail=message.author.display_avatar.url,
+                    fields=[
+                        ("👤  User",     f"{message.author.mention}", True),
+                        ("📂  Channel",  message.channel.mention,     True),
+                        ("🔢  Mentions", str(mention_count),          True),
+                    ]
+                ))
+                await bot.process_commands(message)
+                return
+
+        # Anti-emoji spam
+        if cfg.get("automod_emojis"):
+            # Match unicode emoji + custom discord emoji
+            emoji_count = len(re.findall(
+                r"[\U0001F300-\U0001FAFF\U00002702-\U000027B0\U0000FE00-\U0000FEFF]|<a?:[^:]+:\d+>",
+                content))
+            if emoji_count > cfg.get("automod_emojis_limit", 10):
+                try: await message.delete()
+                except Exception: pass
+                await message.channel.send(
+                    embed=discord.Embed(title="🚫  Emoji Spam",
+                                        description=f"{message.author.mention}, please don't spam emojis ({emoji_count} found).",
+                                        color=C_RED),
+                    delete_after=6)
+                await send_log(message.guild, _log_embed(
+                    "AutoMod: Emoji Spam", C_ORANGE, icon="😀",
+                    thumbnail=message.author.display_avatar.url,
+                    fields=[
+                        ("👤  User",    f"{message.author.mention}", True),
+                        ("📂  Channel", message.channel.mention,     True),
+                        ("🔢  Count",   str(emoji_count),            True),
+                    ]
+                ))
+                await bot.process_commands(message)
+                return
+
+        # Anti-zalgo (Unicode combining character pollution)
+        if cfg.get("automod_zalgo"):
+            zalgo_count = len(re.findall(r"[\u0300-\u036f\u0489\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]", content))
+            if zalgo_count > 5:
+                try: await message.delete()
+                except Exception: pass
+                await message.channel.send(
+                    embed=discord.Embed(title="🚫  Zalgo Text Blocked",
+                                        description=f"{message.author.mention}, corrupted/zalgo text is not allowed.",
+                                        color=C_RED),
+                    delete_after=6)
+                await send_log(message.guild, _log_embed(
+                    "AutoMod: Zalgo Text", C_ORANGE, icon="🌀",
+                    thumbnail=message.author.display_avatar.url,
+                    fields=[
+                        ("👤  User",    f"{message.author.mention}", True),
+                        ("📂  Channel", message.channel.mention,     True),
+                    ]
+                ))
+                await bot.process_commands(message)
+                return
+
+        # Anti-repeated characters (aaaaaa / !!!!! etc.)
+        if cfg.get("automod_repeated_chars"):
+            limit = cfg.get("automod_repeated_limit", 8)
+            if re.search(rf"(.)\1{{{limit},}}", content):
+                try: await message.delete()
+                except Exception: pass
+                await message.channel.send(
+                    embed=discord.Embed(title="🚫  Repeated Characters",
+                                        description=f"{message.author.mention}, please don't repeat characters excessively.",
+                                        color=C_RED),
+                    delete_after=6)
+                await send_log(message.guild, _log_embed(
+                    "AutoMod: Repeated Chars", C_ORANGE, icon="🔁",
+                    thumbnail=message.author.display_avatar.url,
+                    fields=[
+                        ("👤  User",    f"{message.author.mention}", True),
+                        ("📂  Channel", message.channel.mention,     True),
+                    ]
+                ))
+                await bot.process_commands(message)
+                return
+
         # Anti-caps
         if cfg.get("automod_caps"):
-            content = message.content
             if len(content) >= cfg.get("automod_caps_min", 10):
                 caps  = sum(1 for c in content if c.isupper())
                 total = sum(1 for c in content if c.isalpha())
@@ -1040,7 +1479,7 @@ async def on_message(message: discord.Message):
 
         # Bad words
         for word in cfg.get("automod_badwords", []):
-            if word.lower() in message.content.lower():
+            if word.lower() in content.lower():
                 try: await message.delete()
                 except Exception: pass
                 await message.channel.send(
@@ -1233,7 +1672,8 @@ async def viewpermissions(interaction: discord.Interaction, group: str = None):
 @bot.tree.command(name="setupantinuke", description="Configure the Anti-Nuke protection system")
 @app_commands.describe(
     enabled="Enable or disable anti-nuke (true/false)",
-    action="Response action: strip | kick | ban",
+    action="Response action: strip | strip+ban | kick | ban",
+    anti_everyone="Trigger anti-nuke on unauthorized @everyone/@here pings",
     bans="Max bans before triggering (default 3)",
     kicks="Max kicks before triggering (default 5)",
     channels="Max channel deletes before triggering (default 3)",
@@ -1244,17 +1684,25 @@ async def viewpermissions(interaction: discord.Interaction, group: str = None):
 @app_commands.default_permissions(administrator=True)
 async def setupantinuke(interaction: discord.Interaction,
                          enabled: bool = None, action: str = None,
+                         anti_everyone: bool = None,
                          bans: int = None, kicks: int = None,
                          channels: int = None, roles: int = None,
                          window: int = None, whitelist_role: discord.Role = None):
     cfg = gcfg(interaction.guild.id)
     changes = []
-    if enabled  is not None: cfg["antinuke_enabled"] = enabled;           changes.append(f"Enabled: `{enabled}`")
-    if action   is not None:
-        if action not in ("strip","kick","ban"):
+    if enabled        is not None:
+        cfg["antinuke_enabled"] = enabled
+        changes.append(f"Enabled: `{enabled}`")
+    if anti_everyone  is not None:
+        cfg["antinuke_anti_everyone"] = anti_everyone
+        changes.append(f"Anti-@everyone: `{anti_everyone}`")
+    if action         is not None:
+        if action not in ("strip", "strip+ban", "kick", "ban"):
             return await interaction.response.send_message(
-                embed=_e_error("Invalid Action","Choose `strip`, `kick`, or `ban`."), ephemeral=True)
-        cfg["antinuke_action"] = action;     changes.append(f"Action: `{action}`")
+                embed=_e_error("Invalid Action", "Choose `strip`, `strip+ban`, `kick`, or `ban`."),
+                ephemeral=True)
+        cfg["antinuke_action"] = action
+        changes.append(f"Action: `{action}`")
     if bans     is not None: cfg["antinuke_threshold_bans"]     = bans;     changes.append(f"Ban threshold: `{bans}`")
     if kicks    is not None: cfg["antinuke_threshold_kicks"]    = kicks;    changes.append(f"Kick threshold: `{kicks}`")
     if channels is not None: cfg["antinuke_threshold_channels"] = channels; changes.append(f"Channel del threshold: `{channels}`")
@@ -1272,16 +1720,23 @@ async def setupantinuke(interaction: discord.Interaction,
 
     wl_roles = [interaction.guild.get_role(int(r)) for r in cfg["antinuke_whitelist"] if interaction.guild.get_role(int(r))]
     e = _e_success("Anti-Nuke Updated", "\n".join(changes) or "No changes.")
-    e.add_field(name="Status",     value="`ON`" if cfg["antinuke_enabled"] else "`OFF`",     inline=True)
-    e.add_field(name="Action",     value=f"`{cfg['antinuke_action']}`",                       inline=True)
-    e.add_field(name="Window",     value=f"`{cfg['antinuke_window']}s`",                      inline=True)
+    e.add_field(name="Status",         value="`ON`" if cfg["antinuke_enabled"] else "`OFF`", inline=True)
+    e.add_field(name="Action",         value=f"`{cfg['antinuke_action']}`",                  inline=True)
+    e.add_field(name="Anti-@everyone", value="`ON`" if cfg.get("antinuke_anti_everyone") else "`OFF`", inline=True)
+    e.add_field(name="Window",         value=f"`{cfg['antinuke_window']}s`",                 inline=True)
     e.add_field(name="Thresholds", value=(
         f"Bans: `{cfg['antinuke_threshold_bans']}`  •  "
         f"Kicks: `{cfg['antinuke_threshold_kicks']}`  •  "
         f"Ch-Del: `{cfg['antinuke_threshold_channels']}`  •  "
         f"Role-Del: `{cfg['antinuke_threshold_roles']}`"
     ), inline=False)
-    e.add_field(name="Whitelist",  value=" ".join(r.mention for r in wl_roles) or "None", inline=False)
+    e.add_field(name="Whitelist", value=" ".join(r.mention for r in wl_roles) or "None", inline=False)
+    e.add_field(name="Actions explained", value=(
+        "• `strip` — Remove all roles from executor\n"
+        "• `strip+ban` — Remove all roles **and** ban executor\n"
+        "• `kick` — Kick executor\n"
+        "• `ban` — Permanently ban executor"
+    ), inline=False)
     await interaction.response.send_message(embed=e)
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1324,13 +1779,46 @@ async def setupgoodbye(interaction: discord.Interaction, channel: discord.TextCh
     e.add_field(name="Template", value=cfg["goodbye_message"], inline=False)
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="setuproblox", description="Enable Roblox update notifications")
+@bot.tree.command(name="setuproblox", description="Enable Roblox update notifications (v4 — future + live detection)")
+@app_commands.describe(
+    channel="Channel to post update alerts in",
+    live_ping_role="Role to ping on a LIVE update (player version changed)",
+    future_ping_role="Role to ping on a FUTURE/pre-release update (studio ahead of player)"
+)
 @app_commands.default_permissions(administrator=True)
-async def setuproblox(interaction: discord.Interaction, channel: discord.TextChannel):
-    gcfg(interaction.guild.id)["roblox_channel"] = str(channel.id); save_cfg()
-    await interaction.response.send_message(embed=_e_success(
-        "Roblox Watcher Enabled",
-        f"Roblox update alerts → {channel.mention}\nChecks every 5 minutes."))
+async def setuproblox(interaction: discord.Interaction,
+                       channel: discord.TextChannel,
+                       live_ping_role: discord.Role = None,
+                       future_ping_role: discord.Role = None):
+    cfg = gcfg(interaction.guild.id)
+    cfg["roblox_channel"] = str(channel.id)
+    if live_ping_role:   cfg["roblox_ping_role"]        = str(live_ping_role.id)
+    if future_ping_role: cfg["roblox_future_ping_role"] = str(future_ping_role.id)
+    # Seed version so first run doesn't false-alarm
+    player_ver = None
+    studio_ver = None
+    try:
+        player_ver = await _fetch_roblox_version("WindowsPlayer")
+        studio_ver = await _fetch_roblox_version("WindowsStudio64")
+    except Exception:
+        pass
+    if player_ver: cfg["roblox_last_player_version"] = player_ver
+    if studio_ver: cfg["roblox_last_studio_version"] = studio_ver
+    save_cfg()
+    e = _e_success(
+        "Roblox Watcher v4 Enabled",
+        f"Update alerts → {channel.mention}\n"
+        f"Checks every **3 minutes** for both **live** and **future** updates."
+    )
+    e.add_field(name="🔴  Live Update Ping",   value=live_ping_role.mention   if live_ping_role   else "None set", inline=True)
+    e.add_field(name="🟡  Future Update Ping", value=future_ping_role.mention if future_ping_role else "None set", inline=True)
+    e.add_field(name="Current Player Version", value=f"`{player_ver or 'unknown'}`", inline=False)
+    e.add_field(name="Current Studio Version", value=f"`{studio_ver or 'unknown'}`", inline=False)
+    e.add_field(name="How it works", value=(
+        "🟡 **Future** — Studio has a version newer than Player (update coming soon)\n"
+        "🔴 **Live** — Player version changed (players must update now)"
+    ), inline=False)
+    await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="setupsuggestions", description="Set the suggestions channel")
 @app_commands.default_permissions(administrator=True)
@@ -1376,31 +1864,67 @@ async def setuplock(interaction: discord.Interaction,
     e.add_field(name="Exempt Roles", value=" ".join(r.mention for r in exempt) or "None", inline=True)
     await interaction.response.send_message(embed=e)
 
-@bot.tree.command(name="setupautomod", description="Configure AutoMod filters")
-@app_commands.describe(links="Block links", caps="Block excessive caps",
-                        caps_percent="Caps threshold %", caps_min_length="Min length for caps check",
-                        exempt_role="Toggle AutoMod-exempt role")
+@bot.tree.command(name="setupautomod", description="Configure AutoMod filters (v4 — smart detection)")
+@app_commands.describe(
+    links="Block external links",
+    caps="Block excessive CAPS",
+    caps_percent="Caps % to trigger (default 80)",
+    caps_min_length="Min message length to check caps (default 10)",
+    invites="Block Discord server invite links (discord.gg)",
+    mentions="Block excessive @mentions in one message",
+    mentions_limit="Max @mentions before deletion (default 5)",
+    emojis="Block emoji spam",
+    emojis_limit="Max emojis before deletion (default 10)",
+    zalgo="Block zalgo/Unicode pollution text",
+    repeated_chars="Block repeated character runs (aaaaaa)",
+    repeated_limit="How many repeated chars trigger (default 8)",
+    exempt_role="Toggle AutoMod-exempt role"
+)
 @app_commands.default_permissions(administrator=True)
 async def setupautomod(interaction: discord.Interaction,
                         links: bool = None, caps: bool = None,
                         caps_percent: int = None, caps_min_length: int = None,
+                        invites: bool = None,
+                        mentions: bool = None, mentions_limit: int = None,
+                        emojis: bool = None, emojis_limit: int = None,
+                        zalgo: bool = None,
+                        repeated_chars: bool = None, repeated_limit: int = None,
                         exempt_role: discord.Role = None):
     cfg = gcfg(interaction.guild.id); changes = []
-    if links    is not None: cfg["automod_links"] = links;              changes.append(f"Anti-Links: `{'ON' if links else 'OFF'}`")
-    if caps     is not None: cfg["automod_caps"]  = caps;              changes.append(f"Anti-Caps: `{'ON' if caps else 'OFF'}`")
-    if caps_percent  is not None: cfg["automod_caps_pct"] = caps_percent;  changes.append(f"Caps %: `{caps_percent}`")
-    if caps_min_length is not None: cfg["automod_caps_min"] = caps_min_length; changes.append(f"Caps min: `{caps_min_length}`")
+    def _tog(key, val, label):
+        cfg[key] = val
+        changes.append(f"{label}: `{'ON' if val else 'OFF'}`")
+    if links          is not None: _tog("automod_links",          links,          "Anti-Links")
+    if caps           is not None: _tog("automod_caps",           caps,           "Anti-Caps")
+    if invites        is not None: _tog("automod_invites",        invites,        "Anti-Invites")
+    if mentions       is not None: _tog("automod_mentions",       mentions,       "Anti-Mentions")
+    if emojis         is not None: _tog("automod_emojis",         emojis,         "Anti-Emoji-Spam")
+    if zalgo          is not None: _tog("automod_zalgo",          zalgo,          "Anti-Zalgo")
+    if repeated_chars is not None: _tog("automod_repeated_chars", repeated_chars, "Anti-Repeated-Chars")
+    if caps_percent   is not None: cfg["automod_caps_pct"]         = caps_percent;  changes.append(f"Caps %: `{caps_percent}`")
+    if caps_min_length is not None: cfg["automod_caps_min"]        = caps_min_length; changes.append(f"Caps min-len: `{caps_min_length}`")
+    if mentions_limit is not None: cfg["automod_mentions_limit"]   = mentions_limit; changes.append(f"Mention limit: `{mentions_limit}`")
+    if emojis_limit   is not None: cfg["automod_emojis_limit"]     = emojis_limit;   changes.append(f"Emoji limit: `{emojis_limit}`")
+    if repeated_limit is not None: cfg["automod_repeated_limit"]   = repeated_limit; changes.append(f"Repeat limit: `{repeated_limit}`")
     if exempt_role:
         rid = str(exempt_role.id)
-        if rid in cfg["automod_exempt_roles"]: cfg["automod_exempt_roles"].remove(rid); changes.append(f"Removed exempt: {exempt_role.mention}")
-        else: cfg["automod_exempt_roles"].append(rid); changes.append(f"Added exempt: {exempt_role.mention}")
+        if rid in cfg["automod_exempt_roles"]:
+            cfg["automod_exempt_roles"].remove(rid); changes.append(f"Removed exempt: {exempt_role.mention}")
+        else:
+            cfg["automod_exempt_roles"].append(rid); changes.append(f"Added exempt: {exempt_role.mention}")
     save_cfg()
-    e = _e_success("AutoMod Updated", "\n".join(changes) or "No changes.")
-    e.add_field(name="Status", value=(
-        f"Links: `{'ON' if cfg['automod_links'] else 'OFF'}`\n"
-        f"Caps: `{'ON' if cfg['automod_caps'] else 'OFF'}` ({cfg['automod_caps_pct']}%)\n"
-        f"Bad Words: `{len(cfg['automod_badwords'])} words`"
-    ), inline=False)
+    e = _e_success("AutoMod v4 Updated", "\n".join(changes) or "No changes.")
+    def _s(k): return "`ON`" if cfg.get(k) else "`OFF`"
+    e.add_field(name="🔗  Anti-Links",    value=_s("automod_links"),          inline=True)
+    e.add_field(name="🔤  Anti-Caps",     value=f"{_s('automod_caps')} {cfg['automod_caps_pct']}%", inline=True)
+    e.add_field(name="📩  Anti-Invites",  value=_s("automod_invites"),         inline=True)
+    e.add_field(name="@  Anti-Mentions",  value=f"{_s('automod_mentions')} max {cfg['automod_mentions_limit']}", inline=True)
+    e.add_field(name="😀  Anti-Emojis",   value=f"{_s('automod_emojis')} max {cfg['automod_emojis_limit']}", inline=True)
+    e.add_field(name="🌀  Anti-Zalgo",    value=_s("automod_zalgo"),           inline=True)
+    e.add_field(name="🔁  Anti-Repeat",   value=f"{_s('automod_repeated_chars')} run {cfg['automod_repeated_limit']}", inline=True)
+    e.add_field(name="🚫  Bad Words",     value=f"`{len(cfg['automod_badwords'])} words`", inline=True)
+    exempt = [interaction.guild.get_role(int(r)) for r in cfg["automod_exempt_roles"] if interaction.guild.get_role(int(r))]
+    e.add_field(name="✅  Exempt Roles",  value=" ".join(r.mention for r in exempt) or "None", inline=False)
     await interaction.response.send_message(embed=e)
 
 @bot.tree.command(name="badword", description="Add or remove a word from the filter")
@@ -2056,17 +2580,48 @@ async def untimeout(interaction: discord.Interaction, member: discord.Member, re
         fields=[("👤  User", f"{member.mention}", True), ("🛡️  By", interaction.user.mention, True)]))
 
 @bot.tree.command(name="warn", description="Issue a formal warning to a member")
+@app_commands.describe(member="Member to warn", reason="Reason for the warning")
 @app_commands.default_permissions(manage_messages=True)
-async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = None):
-    if not has_cmd_perm(interaction, "warn"): return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
-    count = warn_user(str(interaction.guild.id), str(member.id), reason or "No reason", str(interaction.user))
-    await dm_user(member, discord.Embed(title=f"⚠️  Warning in {interaction.guild.name}",
-                                         description=f"**Reason:** {reason or 'No reason'}\n**Total warnings:** {count}",
-                                         color=C_YELLOW))
-    e = _e_success("Warning Issued", f"{member.mention} warned. They now have **{count}** warning(s).")
-    e.add_field(name="Reason", value=reason or "No reason")
+async def warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+    if not has_cmd_perm(interaction, "warn"):
+        return await interaction.response.send_message(embed=perm_denied(), ephemeral=True)
+    gid   = str(interaction.guild.id)
+    count = warn_user(gid, str(member.id), reason, str(interaction.user))
+
+    # DM the warned user
+    await dm_user(member, discord.Embed(
+        title=f"⚠️  Warning in {interaction.guild.name}",
+        description=f"**Reason:** {reason}\n**Total warnings:** {count}",
+        color=C_YELLOW))
+
+    # Response embed — show threshold hint if configured
+    cfg_w = gcfg(interaction.guild.id)
+    thr   = cfg_w.get("warn_thresholds", {})
+    next_thr = next((k for k in sorted(thr, key=int) if int(k) > count), None)
+    e = _e_success("⚠️  Warning Issued",
+                   f"{member.mention} warned — they now have **{count}** warning(s).")
+    e.add_field(name="Reason", value=reason, inline=False)
+    if next_thr and str(next_thr) in thr:
+        e.add_field(name="⚡  Next Threshold",
+                    value=f"Action `{thr[str(next_thr)]}` triggers at **{next_thr}** warns",
+                    inline=False)
     await interaction.response.send_message(embed=e)
-    await send_log(interaction.guild, _mod_embed("Warning Issued","⚠️",C_YELLOW,interaction.user,member,reason,{"Total":str(count)}))
+    await send_log(interaction.guild, _mod_embed(
+        "Warning Issued", "⚠️", C_YELLOW, interaction.user, member, reason,
+        {"Total Warns": str(count)}))
+
+    # Log case
+    _add_case(gid, {
+        "action":    "warn",
+        "user_id":   str(member.id),
+        "mod_id":    str(interaction.user.id),
+        "reason":    reason,
+        "timestamp": int(now_utc().timestamp()),
+        "extra":     f"warn #{count}",
+    })
+
+    # Auto-escalate if threshold hit
+    await _apply_warn_escalation(interaction, member, count)
 
 @bot.tree.command(name="warnings", description="View warnings for a member")
 async def warnings_cmd(interaction: discord.Interaction, member: discord.Member):
@@ -2873,11 +3428,36 @@ async def help_cmd(interaction: discord.Interaction):
         "`/afk` `/remind`\n"
         "`/setuplevels` `/setupsuggestions`"
     ), inline=True)
-    e.add_field(name="🎮  Roblox Watcher", value=(
-        "`/setuproblox` — set alert channel\n"
-        "Checks every 5 minutes\n"
-        "Alerts when a new version is released"
+    e.add_field(name="🎮  Roblox Watcher v4", value=(
+        "`/setuproblox` — set channel + ping roles\n"
+        "🟡 **Future update** when Studio > Player\n"
+        "🔴 **Live update** when Player version changes\n"
+        "Checks every **3 minutes**, posts version hash + download"
     ), inline=True)
+    e.add_field(name="🍯  Honeypot", value=(
+        "`/setuphoneypot` — set channels + action\n"
+        "Anyone who types in honeypot → actioned\n"
+        "Actions: softban, ban, kick, timeout\n"
+        "Auto-logs every trigger"
+    ), inline=True)
+    e.add_field(name="📊  Stats Channels", value=(
+        "`/setupstatschannels` — auto-updating voice channels\n"
+        "Shows: members, online, bots, channels, roles\n"
+        "Updates every 10 minutes"
+    ), inline=True)
+    e.add_field(name="📨  Invite Tracking", value=(
+        "`/inviteleaderboard` — top inviters\n"
+        "`/inviteinfo` — per-user invite stats\n"
+        "Tracks which invite each member used on join\n"
+        "Displayed in welcome message + join log"
+    ), inline=True)
+    e.add_field(name="🎵  Music (Spotify-style)", value=(
+        "`/play` — Spotify link / YouTube URL / song name\n"
+        "`/pause` `/resume` `/skip` `/stop` `/disconnect`\n"
+        "`/queue` `/nowplaying` `/search`\n"
+        "`/volume` `/loop` `/shuffle`\n"
+        "Playlists & albums supported via Spotify links"
+    ), inline=False)
     e.add_field(name="🛠️  Utility", value=(
         "`/userinfo` `/serverinfo` `/roleinfo` `/channelinfo`\n"
         "`/avatar` `/banner` `/ping` `/stats`\n"
@@ -2888,14 +3468,1252 @@ async def help_cmd(interaction: discord.Interaction):
     ), inline=True)
     e.add_field(name="📋  Auto-Logging (log channel)", value=(
         "All mod actions  •  Message edits & deletes\n"
-        "Member join/leave  •  Role changes  •  Nickname changes\n"
+        "Member join/leave (with invite used)  •  Role changes  •  Nickname changes\n"
         "Voice state changes  •  Channel create/delete\n"
-        "Anti-spam, anti-nuke, bad words, link blocks\n"
-        "Invite create/delete  •  Webhook activity"
+        "Anti-spam, anti-nuke, honeypot, bad words, link blocks\n"
+        "Invite create/delete (with expiry)  •  Webhook activity"
     ), inline=False)
-    e.set_footer(text="TSR Bot v3.0  •  /setuplog first to enable logging!")
+    e.set_footer(text="TSR Advanced Discord Bot v4.0  •  /setuplog first to enable logging!")
     e.timestamp = now_utc()
     await interaction.response.send_message(embed=e, ephemeral=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  HONEYPOT SETUP
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="setuphoneypot", description="Configure honeypot channels — anyone who types gets actioned")
+@app_commands.describe(
+    channel="Channel to designate as a honeypot (add to list or remove if already set)",
+    action="Action to take: softban | ban | kick | timeout",
+    log="Whether to log honeypot triggers to the log channel"
+)
+@app_commands.default_permissions(administrator=True)
+async def setuphoneypot(interaction: discord.Interaction,
+                         channel: discord.TextChannel = None,
+                         action: str = None,
+                         log: bool = None):
+    cfg = gcfg(interaction.guild.id)
+    changes = []
+
+    if channel:
+        ch_list = cfg.setdefault("honeypot_channels", [])
+        ch_id = str(channel.id)
+        if ch_id in ch_list:
+            ch_list.remove(ch_id)
+            changes.append(f"Removed honeypot: {channel.mention}")
+        else:
+            ch_list.append(ch_id)
+            changes.append(f"Added honeypot: {channel.mention}")
+
+    if action:
+        if action not in ("softban", "ban", "kick", "timeout"):
+            return await interaction.response.send_message(
+                embed=_e_error("Invalid Action", "Choose `softban`, `ban`, `kick`, or `timeout`."),
+                ephemeral=True)
+        cfg["honeypot_action"] = action
+        changes.append(f"Action: `{action}`")
+
+    if log is not None:
+        cfg["honeypot_log"] = log
+        changes.append(f"Log: `{log}`")
+
+    save_cfg()
+
+    active_channels = [
+        interaction.guild.get_channel(int(c))
+        for c in cfg.get("honeypot_channels", [])
+        if interaction.guild.get_channel(int(c))
+    ]
+
+    e = _e_success("Honeypot Updated", "\n".join(changes) or "No changes made.")
+    e.add_field(name="Active Honeypots",
+                value="\n".join(c.mention for c in active_channels) or "None",
+                inline=False)
+    e.add_field(name="Action",  value=f"`{cfg.get('honeypot_action', 'softban')}`", inline=True)
+    e.add_field(name="Logging", value="`ON`" if cfg.get("honeypot_log", True) else "`OFF`", inline=True)
+    e.add_field(name="How it works", value=(
+        "Any **non-bot, non-admin** member who sends a message in a honeypot channel "
+        "will be automatically actioned.\n\n"
+        "Make these channels invisible to mods/admins but visible to raid bots."
+    ), inline=False)
+    await interaction.response.send_message(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  STATS CHANNELS SETUP
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="setupstatschannels", description="Set voice channels that auto-display server statistics")
+@app_commands.describe(
+    members_channel="Voice channel to show total member count",
+    online_channel="Voice channel to show online member count",
+    bots_channel="Voice channel to show bot count",
+    channels_channel="Voice channel to show total channel count",
+    roles_channel="Voice channel to show total role count"
+)
+@app_commands.default_permissions(administrator=True)
+async def setupstatschannels(interaction: discord.Interaction,
+                              members_channel: discord.VoiceChannel = None,
+                              online_channel: discord.VoiceChannel = None,
+                              bots_channel: discord.VoiceChannel = None,
+                              channels_channel: discord.VoiceChannel = None,
+                              roles_channel: discord.VoiceChannel = None):
+    cfg = gcfg(interaction.guild.id)
+    changes = []
+
+    def _set(key, ch, label):
+        if ch:
+            cfg[key] = str(ch.id)
+            changes.append(f"{label}: {ch.mention}")
+
+    _set("stat_ch_members",  members_channel,  "Members counter")
+    _set("stat_ch_online",   online_channel,   "Online counter")
+    _set("stat_ch_bots",     bots_channel,     "Bots counter")
+    _set("stat_ch_channels", channels_channel, "Channels counter")
+    _set("stat_ch_roles",    roles_channel,    "Roles counter")
+
+    if not changes:
+        return await interaction.response.send_message(
+            embed=_e_error("No Channels Set", "Pass at least one voice channel parameter."),
+            ephemeral=True)
+
+    save_cfg()
+
+    e = _e_success("Stats Channels Configured", "\n".join(changes))
+    e.add_field(name="Update frequency", value="Every 10 minutes (Discord rate-limits channel edits)", inline=False)
+    e.add_field(name="Tip", value="Create locked voice channels (no connect permission) and the bot will rename them automatically.", inline=False)
+    await interaction.response.send_message(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  INVITE COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.tree.command(name="inviteleaderboard", description="Show top inviters in this server")
+async def inviteleaderboard(interaction: discord.Interaction):
+    if not await has_cmd_perm(interaction, "inviteleaderboard"):
+        return await interaction.response.send_message(embed=_e_error("No Permission", "You don't have permission to use this command."), ephemeral=True)
+    await interaction.response.defer()
+    gid = str(interaction.guild.id)
+    data = invite_db.get(gid, {})
+    if not data:
+        return await interaction.followup.send(embed=_e_error("No Data", "No invite data recorded yet. Make sure members have joined via tracked invites."))
+
+    sorted_inviters = sorted(data.items(), key=lambda x: x[1].get("uses", 0), reverse=True)[:15]
+
+    e = discord.Embed(title="📨  Invite Leaderboard", color=C_GOLD)
+    e.set_thumbnail(url=interaction.guild.icon.url if interaction.guild.icon else None)
+
+    rows = []
+    for rank, (uid, info) in enumerate(sorted_inviters, 1):
+        member = interaction.guild.get_member(int(uid))
+        name   = member.mention if member else f"`{uid}`"
+        uses   = info.get("uses", 0)
+        medal  = {1: "🥇", 2: "🥈", 3: "🥉"}.get(rank, f"`#{rank}`")
+        rows.append(f"{medal} {name} — **{uses}** invite{'s' if uses != 1 else ''}")
+
+    e.description = "\n".join(rows) or "No invites tracked yet."
+    e.set_footer(text=f"Top {len(sorted_inviters)} inviters  •  TSR Bot v4")
+    e.timestamp = now_utc()
+    await interaction.followup.send(embed=e)
+
+@bot.tree.command(name="inviteinfo", description="See how many invites a member has")
+@app_commands.describe(member="Member to look up (leave blank for yourself)")
+async def inviteinfo(interaction: discord.Interaction, member: discord.Member = None):
+    if not await has_cmd_perm(interaction, "inviteinfo"):
+        return await interaction.response.send_message(embed=_e_error("No Permission", "You don't have permission to use this command."), ephemeral=True)
+    target = member or interaction.user
+    gid    = str(interaction.guild.id)
+    info   = invite_db.get(gid, {}).get(str(target.id), {})
+    uses   = info.get("uses", 0)
+    invited_ids = info.get("members", [])
+
+    e = discord.Embed(
+        title=f"📨  Invite Info — {target.display_name}",
+        color=C_BLUE
+    )
+    e.set_thumbnail(url=target.display_avatar.url)
+    e.add_field(name="Total Invites",  value=str(uses), inline=True)
+    e.add_field(name="Members Invited", value=str(len(invited_ids)), inline=True)
+
+    # Show last 8 invited members
+    if invited_ids:
+        names = []
+        for uid in invited_ids[-8:]:
+            m = interaction.guild.get_member(int(uid))
+            names.append(m.mention if m else f"`{uid}` (left)")
+        e.add_field(name="Recently Invited", value="\n".join(reversed(names)), inline=False)
+
+    e.set_footer(text="TSR Invite Tracker v4")
+    e.timestamp = now_utc()
+    await interaction.response.send_message(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  MUSIC SYSTEM  —  Spotify-style (audio sourced from YouTube via yt-dlp)
+# ═══════════════════════════════════════════════════════════════════════════
+
+C_SPOTIFY = 0x1DB954   # Spotify green
+
+YDL_OPTS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "ytsearch",
+    "source_address": "0.0.0.0",
+}
+FFMPEG_OPTS = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
+}
+
+# Per-guild music state (in-memory)
+music_queues:  dict = {}   # gid -> list[track dict]
+music_playing: dict = {}   # gid -> track dict | None
+music_loop:    dict = {}   # gid -> bool
+music_volume:  dict = {}   # gid -> float (0.0 – 2.0, default 1.0)
+music_vc:      dict = {}   # gid -> discord.VoiceClient
+
+# ── Spotify client factory ────────────────────────────────────────────────
+
+def _get_spotify():
+    if not SPOTIPY_OK:
+        return None
+    cid  = os.environ.get("SPOTIFY_CLIENT_ID", "")
+    csec = os.environ.get("SPOTIFY_CLIENT_SECRET", "")
+    if not cid or not csec:
+        return None
+    try:
+        return spotipy.Spotify(
+            auth_manager=SpotifyClientCredentials(client_id=cid, client_secret=csec))
+    except Exception:
+        return None
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+def _fmt_dur(seconds) -> str:
+    if not seconds:
+        return "?:??"
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+def _sp_id(url: str, kind: str) -> Optional[str]:
+    m = re.search(rf"spotify\.com/{kind}/([A-Za-z0-9]+)", url)
+    return m.group(1) if m else None
+
+def _ytdl_fetch(query: str) -> Optional[dict]:
+    """Synchronous — run in executor."""
+    if not YT_DLP_OK:
+        return None
+    try:
+        with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
+            info = ydl.extract_info(query, download=False)
+            if info and "entries" in info:
+                info = info["entries"][0]
+            if not info:
+                return None
+            return {
+                "url":         info.get("url", ""),
+                "webpage_url": info.get("webpage_url", ""),
+                "title":       info.get("title", "Unknown"),
+                "duration":    info.get("duration", 0),
+                "thumbnail":   info.get("thumbnail", ""),
+                "uploader":    info.get("uploader", ""),
+            }
+    except Exception:
+        return None
+
+async def _yt_async(query: str) -> Optional[dict]:
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _ytdl_fetch, query)
+
+async def _resolve_input(raw: str, sp) -> list:
+    """
+    Returns a list of track dicts ready to queue.
+    Handles: Spotify track URL, Spotify playlist URL, Spotify album URL,
+             YouTube URL, or plain search query.
+    """
+    tracks = []
+
+    if "open.spotify.com" in raw:
+        # ── Spotify track ──────────────────────────────────────────────────
+        if "/track/" in raw:
+            tid = _sp_id(raw, "track")
+            if sp and tid:
+                try:
+                    t = sp.track(tid)
+                    tracks.append({
+                        "title":        t["name"],
+                        "artist":       ", ".join(a["name"] for a in t["artists"]),
+                        "search_query": f"{t['name']} {t['artists'][0]['name']} official audio",
+                        "album_art":    t["album"]["images"][0]["url"] if t["album"]["images"] else "",
+                        "spotify_url":  raw,
+                        "duration":     t["duration_ms"] // 1000,
+                    })
+                except Exception:
+                    pass
+
+        # ── Spotify playlist ───────────────────────────────────────────────
+        elif "/playlist/" in raw:
+            pid = _sp_id(raw, "playlist")
+            if sp and pid:
+                try:
+                    result = sp.playlist_tracks(pid, limit=50)
+                    for item in result.get("items", []):
+                        t = item.get("track")
+                        if not t or not t.get("name"):
+                            continue
+                        tracks.append({
+                            "title":        t["name"],
+                            "artist":       ", ".join(a["name"] for a in t["artists"]),
+                            "search_query": f"{t['name']} {t['artists'][0]['name']} official audio",
+                            "album_art":    t["album"]["images"][0]["url"] if t["album"]["images"] else "",
+                            "spotify_url":  f"https://open.spotify.com/track/{t['id']}",
+                            "duration":     t["duration_ms"] // 1000,
+                        })
+                except Exception:
+                    pass
+
+        # ── Spotify album ──────────────────────────────────────────────────
+        elif "/album/" in raw:
+            aid = _sp_id(raw, "album")
+            if sp and aid:
+                try:
+                    album = sp.album(aid)
+                    art   = album["images"][0]["url"] if album["images"] else ""
+                    for t in album["tracks"]["items"]:
+                        tracks.append({
+                            "title":        t["name"],
+                            "artist":       ", ".join(a["name"] for a in t["artists"]),
+                            "search_query": f"{t['name']} {t['artists'][0]['name']} official audio",
+                            "album_art":    art,
+                            "spotify_url":  f"https://open.spotify.com/track/{t['id']}",
+                            "duration":     t["duration_ms"] // 1000,
+                        })
+                except Exception:
+                    pass
+
+    # ── Fallback: YouTube URL or plain search ──────────────────────────────
+    if not tracks:
+        # If it was a Spotify link but we have no credentials, give a clear error flag
+        if "open.spotify.com" in raw and not sp:
+            tracks.append({
+                "title":        "⚠️ Spotify credentials not set",
+                "artist":       "",
+                "search_query": None,   # sentinel: skip playback, show error
+                "album_art":    "",
+                "spotify_url":  raw,
+                "duration":     0,
+                "_error":       "Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in Railway → Variables to use Spotify links. For now, try `/play Song Name Artist`.",
+            })
+        else:
+            tracks.append({
+                "title":        raw,
+                "artist":       "",
+                "search_query": raw,
+                "album_art":    "",
+                "spotify_url":  "",
+                "duration":     0,
+            })
+
+    return tracks
+
+async def _play_next(guild: discord.Guild):
+    """Dequeue next track and start playback. Called after each track ends."""
+    gid = str(guild.id)
+    vc  = music_vc.get(gid)
+    if not vc or not vc.is_connected():
+        return
+
+    # Loop: re-fetch stream URL for current track and replay
+    if music_loop.get(gid) and music_playing.get(gid):
+        cur = music_playing[gid]
+        info = await _yt_async(cur.get("webpage_url") or cur.get("search_query", cur["title"]))
+        if info:
+            cur["url"] = info["url"]
+            src = discord.PCMVolumeTransformer(
+                discord.FFmpegPCMAudio(info["url"], **FFMPEG_OPTS),
+                volume=music_volume.get(gid, 1.0))
+            vc.play(src, after=lambda e: asyncio.run_coroutine_threadsafe(
+                _play_next(guild), bot.loop))
+            return
+
+    q = music_queues.get(gid, [])
+    if not q:
+        music_playing[gid] = None
+        # Auto-disconnect after 3 min silence
+        await asyncio.sleep(180)
+        vc2 = music_vc.get(gid)
+        if vc2 and vc2.is_connected() and not vc2.is_playing():
+            try:
+                await vc2.disconnect()
+            except Exception:
+                pass
+            music_vc.pop(gid, None)
+        return
+
+    track = q.pop(0)
+    music_queues[gid] = q
+    music_playing[gid] = track
+
+    # Resolve stream URL fresh (stream URLs expire)
+    info = await _yt_async(track.get("search_query") or track["title"])
+    if not info:
+        await _play_next(guild)   # skip broken track
+        return
+
+    track.update({
+        "url":         info["url"],
+        "webpage_url": info.get("webpage_url", ""),
+        "thumbnail":   track.get("album_art") or info.get("thumbnail", ""),
+        "duration":    track.get("duration") or info.get("duration", 0),
+        "yt_title":    info.get("title", track["title"]),
+    })
+
+    vol = music_volume.get(gid, 1.0)
+    src = discord.PCMVolumeTransformer(
+        discord.FFmpegPCMAudio(info["url"], **FFMPEG_OPTS), volume=vol)
+
+    def _after(err):
+        if err:
+            print(f"[Music] Playback error in {guild.name}: {err}")
+        asyncio.run_coroutine_threadsafe(_play_next(guild), bot.loop)
+
+    vc.play(src, after=_after)
+
+    # Set bot presence to show what's playing
+    try:
+        await bot.change_presence(activity=discord.Activity(
+            type=discord.ActivityType.listening,
+            name=f"{track['title']}" + (f" · {track['artist']}" if track.get("artist") else "")))
+    except Exception:
+        pass
+
+    # Post now-playing card in the channel the user used
+    np_ch = track.get("np_channel")
+    if np_ch:
+        await _send_np(np_ch, track, gid)
+
+async def _send_np(channel, track: dict, gid: str):
+    queue_len = len(music_queues.get(gid, []))
+    title_md  = (f"[{track['title']}]({track['webpage_url']})"
+                 if track.get("webpage_url") else track["title"])
+    desc      = f"**{title_md}**"
+    if track.get("artist"):
+        desc += f"\nby **{track['artist']}**"
+
+    e = discord.Embed(title="▶️  Now Playing", description=desc, color=C_SPOTIFY)
+    if track.get("thumbnail"):
+        e.set_thumbnail(url=track["thumbnail"])
+    e.add_field(name="⏱️  Duration",      value=_fmt_dur(track.get("duration")), inline=True)
+    e.add_field(name="🔊  Volume",         value=f"{int(music_volume.get(gid, 1.0)*100)}%", inline=True)
+    e.add_field(name="🔁  Loop",           value="`ON`" if music_loop.get(gid) else "`OFF`", inline=True)
+    e.add_field(name="👤  Requested by",   value=track.get("requester_mention", "?"), inline=True)
+    if track.get("spotify_url"):
+        e.add_field(name="🎵  Spotify",    value=f"[Open track]({track['spotify_url']})", inline=True)
+    e.set_footer(text=f"TSR Music  •  {queue_len} track{'s' if queue_len != 1 else ''} in queue")
+    e.timestamp = now_utc()
+    try:
+        await channel.send(embed=e)
+    except Exception:
+        pass
+
+# ── /play ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="play", description="Play a song — paste a Spotify link, YouTube link, or just type a song name")
+@app_commands.describe(song="Spotify URL / YouTube URL / song name to search")
+async def music_play(interaction: discord.Interaction, song: str):
+    if not await has_cmd_perm(interaction, "play"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "You don't have permission to use music commands."), ephemeral=True)
+
+    if not YT_DLP_OK:
+        return await interaction.response.send_message(
+            embed=_e_error("Not Ready", "yt-dlp is not installed. Check `requirements.txt`."), ephemeral=True)
+
+    if not interaction.user.voice or not interaction.user.voice.channel:
+        return await interaction.response.send_message(
+            embed=_e_error("Not in Voice", "Join a voice channel first, then use `/play`."), ephemeral=True)
+
+    await interaction.response.defer()
+
+    gid        = str(interaction.guild.id)
+    sp         = _get_spotify()
+    cfg_play   = gcfg(interaction.guild.id)
+
+    # Respect music channel lock — bot always joins the designated VC
+    locked_ch_id = cfg_play.get("music_channel")
+    if locked_ch_id:
+        locked_ch = interaction.guild.get_channel(int(locked_ch_id))
+        vc_channel = locked_ch if locked_ch else interaction.user.voice.channel
+    else:
+        vc_channel = interaction.user.voice.channel
+
+    # Connect or move to target VC
+    vc = music_vc.get(gid)
+    if not vc or not vc.is_connected():
+        try:
+            vc = await vc_channel.connect()
+            music_vc[gid] = vc
+        except Exception as exc:
+            return await interaction.followup.send(
+                embed=_e_error("Cannot Join VC", str(exc)))
+    elif vc.channel != vc_channel:
+        try:
+            await vc.move_to(vc_channel)
+        except Exception:
+            pass
+
+    # Resolve Spotify / YouTube / search
+    tracks = await _resolve_input(song, sp)
+
+    if not tracks:
+        return await interaction.followup.send(
+            embed=_e_error("Nothing Found", f"No results for `{song[:200]}`."))
+
+    # Handle Spotify-no-credentials sentinel
+    if tracks[0].get("_error"):
+        return await interaction.followup.send(
+            embed=_e_error("Spotify Not Configured", tracks[0]["_error"]))
+
+    # Attach metadata to every track
+    for t in tracks:
+        t["requester_mention"] = interaction.user.mention
+        t["np_channel"]        = interaction.channel
+
+    q = music_queues.setdefault(gid, [])
+
+    if len(tracks) == 1:
+        t = tracks[0]
+        if vc.is_playing() or vc.is_paused():
+            # Add to queue
+            q.append(t)
+            pos = len(q)
+            e = discord.Embed(
+                title="➕  Added to Queue",
+                description=f"**{t['title']}**" + (f"\nby **{t['artist']}**" if t.get("artist") else ""),
+                color=C_SPOTIFY)
+            if t.get("album_art"):
+                e.set_thumbnail(url=t["album_art"])
+            e.add_field(name="Position",  value=f"#{pos}", inline=True)
+            e.add_field(name="Duration",  value=_fmt_dur(t.get("duration")), inline=True)
+            if t.get("spotify_url"):
+                e.add_field(name="Spotify", value=f"[Open]({t['spotify_url']})", inline=True)
+            e.set_footer(text="TSR Music")
+            await interaction.followup.send(embed=e)
+        else:
+            q.append(t)
+            music_queues[gid] = q
+            await _play_next(interaction.guild)
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    description=f"🎵  Loading **{t['title']}**...",
+                    color=C_SPOTIFY))
+    else:
+        # Playlist / album — add all, start if idle
+        q.extend(tracks)
+        music_queues[gid] = q
+        e = discord.Embed(
+            title="📋  Playlist Added to Queue",
+            description=f"Added **{len(tracks)} tracks** to the queue.",
+            color=C_SPOTIFY)
+        if tracks[0].get("album_art"):
+            e.set_thumbnail(url=tracks[0]["album_art"])
+        e.add_field(name="Queue length", value=str(len(q)), inline=True)
+        if sp and "open.spotify.com" in song:
+            e.add_field(name="Source", value=f"[Spotify]({song})", inline=True)
+        e.set_footer(text="TSR Music  •  First track will play momentarily")
+        await interaction.followup.send(embed=e)
+        if not vc.is_playing() and not vc.is_paused():
+            await _play_next(interaction.guild)
+
+# ── /pause ────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="pause", description="Pause the current track")
+async def music_pause(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    vc  = music_vc.get(gid)
+    if not vc or not vc.is_playing():
+        return await interaction.response.send_message(
+            embed=_e_error("Nothing Playing", "Nothing is currently playing."), ephemeral=True)
+    vc.pause()
+    await interaction.response.send_message(
+        embed=discord.Embed(description="⏸️  Paused. Use `/resume` to continue.", color=C_SPOTIFY))
+
+# ── /resume ───────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="resume", description="Resume the paused track")
+async def music_resume(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    vc  = music_vc.get(gid)
+    if not vc or not vc.is_paused():
+        return await interaction.response.send_message(
+            embed=_e_error("Not Paused", "Nothing is paused right now."), ephemeral=True)
+    vc.resume()
+    t   = music_playing.get(gid, {})
+    e   = discord.Embed(
+        description=f"▶️  Resumed **{t.get('title', 'track')}**.",
+        color=C_SPOTIFY)
+    await interaction.response.send_message(embed=e)
+
+# ── /skip ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="skip", description="Skip the current track (or skip N tracks)")
+@app_commands.describe(count="How many tracks to skip (default 1)")
+async def music_skip(interaction: discord.Interaction, count: int = 1):
+    gid = str(interaction.guild.id)
+    vc  = music_vc.get(gid)
+    if not vc or (not vc.is_playing() and not vc.is_paused()):
+        return await interaction.response.send_message(
+            embed=_e_error("Nothing Playing", "Nothing to skip."), ephemeral=True)
+    count = max(1, min(count, 20))
+    # Skip additional tracks from queue if count > 1
+    q = music_queues.get(gid, [])
+    if count > 1:
+        del q[:count - 1]
+        music_queues[gid] = q
+    t = music_playing.get(gid, {})
+    vc.stop()  # triggers _after → _play_next
+    e = discord.Embed(
+        description=f"⏭️  Skipped **{t.get('title', 'track')}**" +
+                    (f" and {count-1} more" if count > 1 else "") + ".",
+        color=C_SPOTIFY)
+    await interaction.response.send_message(embed=e)
+
+# ── /stop ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="stop", description="Stop playback and clear the queue")
+async def music_stop(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    vc  = music_vc.get(gid)
+    music_queues[gid]  = []
+    music_playing[gid] = None
+    music_loop[gid]    = False
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+    await interaction.response.send_message(
+        embed=discord.Embed(description="⏹️  Stopped and queue cleared.", color=C_SPOTIFY))
+
+# ── /nowplaying ───────────────────────────────────────────────────────────
+
+@bot.tree.command(name="nowplaying", description="Show what's currently playing")
+async def music_np(interaction: discord.Interaction):
+    gid   = str(interaction.guild.id)
+    track = music_playing.get(gid)
+    vc    = music_vc.get(gid)
+    if not track or not vc or not vc.is_playing():
+        return await interaction.response.send_message(
+            embed=_e_error("Nothing Playing", "Nothing is playing right now."), ephemeral=True)
+    await interaction.response.defer()
+    await _send_np(interaction.channel, track, gid)
+    await interaction.followup.send(
+        embed=discord.Embed(description="⬆️  Now playing info above.", color=C_SPOTIFY),
+        ephemeral=True)
+
+# ── /queue ────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="queue", description="Show the current music queue")
+async def music_queue(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    q   = music_queues.get(gid, [])
+    cur = music_playing.get(gid)
+
+    e = discord.Embed(title="📋  Music Queue", color=C_SPOTIFY)
+    e.timestamp = now_utc()
+
+    if cur:
+        desc = f"▶️  **{cur['title']}**"
+        if cur.get("artist"):
+            desc += f" — {cur['artist']}"
+        desc += f" `{_fmt_dur(cur.get('duration'))}`"
+        if music_loop.get(gid):
+            desc += " 🔁"
+        e.add_field(name="Now Playing", value=desc, inline=False)
+    else:
+        e.add_field(name="Now Playing", value="*Nothing*", inline=False)
+
+    if q:
+        rows = []
+        for i, t in enumerate(q[:15], 1):
+            line = f"`{i}.` **{t['title']}**"
+            if t.get("artist"):
+                line += f" — {t['artist']}"
+            line += f" `{_fmt_dur(t.get('duration'))}`"
+            rows.append(line)
+        if len(q) > 15:
+            rows.append(f"*… and {len(q)-15} more tracks*")
+        e.add_field(name=f"Up Next ({len(q)} tracks)", value="\n".join(rows), inline=False)
+    else:
+        e.add_field(name="Up Next", value="*Queue is empty*", inline=False)
+
+    total_dur = sum(t.get("duration", 0) for t in q)
+    e.set_footer(text=f"Total queue time: {_fmt_dur(total_dur)}  •  Volume: {int(music_volume.get(gid,1.0)*100)}%")
+    await interaction.response.send_message(embed=e)
+
+# ── /volume ───────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="volume", description="Set the playback volume (0–200%)")
+@app_commands.describe(level="Volume level: 0 (mute) to 200 (max). Default is 100.")
+async def music_volume_cmd(interaction: discord.Interaction, level: int):
+    gid = str(interaction.guild.id)
+    vc  = music_vc.get(gid)
+    level = max(0, min(level, 200))
+    vol   = level / 100.0
+    music_volume[gid] = vol
+    if vc and vc.source and hasattr(vc.source, "volume"):
+        vc.source.volume = vol
+    bar = "█" * (level // 10) + "░" * (20 - level // 10)
+    e = discord.Embed(
+        description=f"🔊  Volume set to **{level}%**\n`{bar}`",
+        color=C_SPOTIFY)
+    await interaction.response.send_message(embed=e)
+
+# ── /loop ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="loop", description="Toggle looping of the current track")
+async def music_loop_cmd(interaction: discord.Interaction):
+    gid  = str(interaction.guild.id)
+    mode = not music_loop.get(gid, False)
+    music_loop[gid] = mode
+    e = discord.Embed(
+        description=f"🔁  Loop is now **{'ON — current track will repeat' if mode else 'OFF'}**.",
+        color=C_SPOTIFY)
+    await interaction.response.send_message(embed=e)
+
+# ── /shuffle ──────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="shuffle", description="Shuffle the queue")
+async def music_shuffle(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    q   = music_queues.get(gid, [])
+    if not q:
+        return await interaction.response.send_message(
+            embed=_e_error("Empty Queue", "There are no tracks to shuffle."), ephemeral=True)
+    random.shuffle(q)
+    music_queues[gid] = q
+    e = discord.Embed(
+        description=f"🔀  Shuffled **{len(q)} tracks** in the queue.",
+        color=C_SPOTIFY)
+    await interaction.response.send_message(embed=e)
+
+# ── /disconnect ───────────────────────────────────────────────────────────
+
+@bot.tree.command(name="disconnect", description="Disconnect the bot from voice and clear the queue")
+async def music_disconnect(interaction: discord.Interaction):
+    gid = str(interaction.guild.id)
+    vc  = music_vc.get(gid)
+    music_queues[gid]  = []
+    music_playing[gid] = None
+    music_loop[gid]    = False
+    if vc and vc.is_connected():
+        try:
+            await vc.disconnect()
+        except Exception:
+            pass
+    music_vc.pop(gid, None)
+    await interaction.response.send_message(
+        embed=discord.Embed(description="👋  Disconnected and queue cleared.", color=C_SPOTIFY))
+
+# ── /search ───────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="search", description="Search for a song and pick from the top 5 results")
+@app_commands.describe(query="Song name or artist to search for")
+async def music_search(interaction: discord.Interaction, query: str):
+    if not YT_DLP_OK:
+        return await interaction.response.send_message(
+            embed=_e_error("Not Ready", "yt-dlp is not installed."), ephemeral=True)
+    await interaction.response.defer()
+
+    def _fetch_multi(q):
+        if not YT_DLP_OK:
+            return []
+        opts = dict(YDL_OPTS)
+        opts["default_search"] = "ytsearch5"
+        opts["noplaylist"] = False
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(q, download=False)
+                return info.get("entries", [])[:5] if info else []
+        except Exception:
+            return []
+
+    loop    = asyncio.get_event_loop()
+    entries = await loop.run_in_executor(None, _fetch_multi, query)
+    if not entries:
+        return await interaction.followup.send(
+            embed=_e_error("No Results", f"No YouTube results for `{query[:200]}`."))
+
+    e = discord.Embed(
+        title=f"🔍  Search results for: {query[:60]}",
+        color=C_SPOTIFY)
+    lines = []
+    for i, ent in enumerate(entries, 1):
+        dur  = _fmt_dur(ent.get("duration", 0))
+        line = f"`{i}.` **[{ent.get('title','?')}]({ent.get('webpage_url','')})** `{dur}`"
+        lines.append(line)
+    e.description = "\n".join(lines)
+    e.set_footer(text="Use /play with the song name or YouTube URL to play one of these.")
+    await interaction.followup.send(embed=e)
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  VOICE STATE — auto-rejoin music channel if bot is kicked
+# ═══════════════════════════════════════════════════════════════════════════
+
+@bot.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
+    if member.id != bot.user.id:
+        return
+    # Bot was disconnected from a VC
+    if before.channel and not after.channel:
+        gid     = str(member.guild.id)
+        cfg_vs  = gcfg(member.guild.id)
+        mc_id   = cfg_vs.get("music_channel")
+        rejoin  = cfg_vs.get("music_auto_rejoin", True)
+
+        # Clear stale VC ref
+        vc_old = music_vc.get(gid)
+        if vc_old and not vc_old.is_connected():
+            music_vc.pop(gid, None)
+
+        # Auto-rejoin the locked channel if we were kicked from it
+        if rejoin and mc_id and str(before.channel.id) == str(mc_id):
+            await asyncio.sleep(3)   # brief pause before reconnect
+            ch = member.guild.get_channel(int(mc_id))
+            if ch:
+                try:
+                    vc_new = await ch.connect()
+                    music_vc[gid] = vc_new
+                except Exception:
+                    pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  NEW MOD + SETUP COMMANDS
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── /setupmusic ───────────────────────────────────────────────────────────
+
+@bot.tree.command(name="setupmusic", description="Lock the bot to a voice channel and optionally enable auto-rejoin")
+@app_commands.describe(
+    channel="The voice channel the bot should always stay in",
+    auto_rejoin="Automatically rejoin if someone kicks the bot (default: True)")
+@app_commands.default_permissions(manage_guild=True)
+async def setupmusic(interaction: discord.Interaction,
+                     channel: discord.VoiceChannel,
+                     auto_rejoin: bool = True):
+    if not await has_cmd_perm(interaction, "setupmusic"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "You need **Manage Server** to run this."), ephemeral=True)
+    cfg = gcfg(interaction.guild.id)
+    cfg["music_channel"]     = channel.id
+    cfg["music_auto_rejoin"] = auto_rejoin
+    save_json("guild_config.json", guild_config)
+    e = discord.Embed(
+        title="🎵  Music Channel Set",
+        description=(f"Bot will always join **{channel.mention}** when music is played.\n"
+                     f"Auto-rejoin if kicked: **{'✅ On' if auto_rejoin else '❌ Off'}**\n\n"
+                     f"Use `/play` normally — it will always come back to this channel.\n"
+                     f"To clear the lock, run `/setupmusic` again with a different channel "
+                     f"or contact your server owner."),
+        color=C_SPOTIFY)
+    e.set_footer(text="TSR Music Setup")
+    await interaction.response.send_message(embed=e)
+    await send_log(interaction.guild, _log_embed(
+        "Music Channel Configured", C_SPOTIFY, icon="🎵",
+        fields=[
+            ("📢  Channel",    channel.mention,          True),
+            ("🔄  Auto-Rejoin", "Yes" if auto_rejoin else "No", True),
+            ("👤  Set by",     interaction.user.mention, True),
+        ]
+    ))
+
+# ── /antiraid ─────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="antiraid", description="Configure automatic anti-raid protection for new accounts")
+@app_commands.describe(
+    enabled="Enable or disable anti-raid",
+    min_age_days="Minimum account age in days to join (default 7)",
+    action="Action when triggered: kick | ban | timeout",
+    dm_user="DM the blocked user with a reason (default True)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="kick",    value="kick"),
+    app_commands.Choice(name="ban",     value="ban"),
+    app_commands.Choice(name="timeout (24h)", value="timeout"),
+])
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_antiraid(interaction: discord.Interaction,
+                       enabled: bool,
+                       min_age_days: int = 7,
+                       action: str = "kick",
+                       dm_user: bool = True):
+    if not await has_cmd_perm(interaction, "antiraid"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "Manage Server required."), ephemeral=True)
+    cfg = gcfg(interaction.guild.id)
+    cfg["antiraid_enabled"]      = enabled
+    cfg["antiraid_min_age_days"] = max(1, min_age_days)
+    cfg["antiraid_action"]       = action
+    cfg["antiraid_dm"]           = dm_user
+    save_json("guild_config.json", guild_config)
+    colour = C_GREEN if enabled else C_RED
+    e = discord.Embed(
+        title=f"🛡️  Anti-Raid {'Enabled' if enabled else 'Disabled'}",
+        colour=colour)
+    if enabled:
+        e.description = (f"Accounts younger than **{min_age_days} days** will be **{action}ed** on join.\n"
+                         f"DM notification: **{'On' if dm_user else 'Off'}**")
+    else:
+        e.description = "Anti-Raid is now **disabled**. All accounts can join freely."
+    e.set_footer(text="TSR Anti-Raid")
+    await interaction.response.send_message(embed=e)
+    await send_log(interaction.guild, _log_embed(
+        f"🛡️  Anti-Raid {'Enabled' if enabled else 'Disabled'}", colour, icon="🛡️",
+        fields=[
+            ("Status",       "Enabled" if enabled else "Disabled", True),
+            ("Min Age",      f"{min_age_days} day(s)",             True),
+            ("Action",       action.title(),                        True),
+            ("Set by",       interaction.user.mention,             True),
+        ]
+    ))
+
+# ── /warnthreshold ────────────────────────────────────────────────────────
+
+@bot.tree.command(name="warnthreshold", description="Set automatic actions when a user reaches a warn count")
+@app_commands.describe(
+    warn_count="Warn count that triggers the action (e.g. 3)",
+    action="Action to take: timeout_1h | timeout_12h | timeout_24h | kick | ban",
+    remove="Remove an existing threshold instead of adding")
+@app_commands.choices(action=[
+    app_commands.Choice(name="timeout 1 hour",   value="timeout_1h"),
+    app_commands.Choice(name="timeout 12 hours", value="timeout_12h"),
+    app_commands.Choice(name="timeout 24 hours", value="timeout_24h"),
+    app_commands.Choice(name="kick",             value="kick"),
+    app_commands.Choice(name="ban",              value="ban"),
+])
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_warnthreshold(interaction: discord.Interaction,
+                             warn_count: int,
+                             action: str = "kick",
+                             remove: bool = False):
+    if not await has_cmd_perm(interaction, "warnthreshold"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "Manage Server required."), ephemeral=True)
+    cfg = gcfg(interaction.guild.id)
+    thresholds: dict = cfg.setdefault("warn_thresholds", {})
+    key = str(warn_count)
+    if remove:
+        thresholds.pop(key, None)
+        save_json("guild_config.json", guild_config)
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                description=f"✅  Removed threshold at **{warn_count} warns**.",
+                color=C_GREEN))
+    thresholds[key] = action
+    save_json("guild_config.json", guild_config)
+
+    # Build pretty summary
+    lines = []
+    for k in sorted(thresholds, key=lambda x: int(x)):
+        lines.append(f"**{k} warns** → `{thresholds[k]}`")
+    e = discord.Embed(
+        title="⚠️  Warn Thresholds Updated",
+        description="\n".join(lines) if lines else "*No thresholds set*",
+        color=C_ORANGE)
+    e.set_footer(text="These trigger automatically when /warn is used.")
+    await interaction.response.send_message(embed=e)
+
+# ── /modlogs ──────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="modlogs", description="View the full moderation history for a user")
+@app_commands.describe(user="The user whose mod history you want to see", page="Page number (default 1)")
+async def cmd_modlogs(interaction: discord.Interaction,
+                      user: discord.User,
+                      page: int = 1):
+    if not await has_cmd_perm(interaction, "modlogs"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "You don't have permission to view mod logs."), ephemeral=True)
+    gid    = str(interaction.guild.id)
+    cases  = cases_db.get(gid, [])
+    user_cases = [c for c in cases if str(c.get("user_id")) == str(user.id)]
+
+    if not user_cases:
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                title=f"📋  Mod Logs — {user}",
+                description="✅  **No moderation actions** on record for this user.",
+                color=C_GREEN))
+
+    per_page = 8
+    total_pages = max(1, math.ceil(len(user_cases) / per_page))
+    page = max(1, min(page, total_pages))
+    chunk = user_cases[-(page * per_page) : len(user_cases) - (page-1)*per_page]
+    chunk.reverse()   # newest first
+
+    e = discord.Embed(
+        title=f"📋  Mod Logs — {user}",
+        colour=C_ORANGE)
+    e.set_thumbnail(url=user.display_avatar.url)
+
+    lines = []
+    for c in chunk:
+        ts  = f"<t:{int(c.get('timestamp', 0))}:d>" if c.get("timestamp") else "?"
+        mod = f"<@{c['mod_id']}>" if c.get("mod_id") else "System"
+        reason = (c.get("reason") or "No reason")[:80]
+        lines.append(
+            f"`#{c.get('case_id','?')}` **{c.get('action','?').upper()}** — {ts} by {mod}\n"
+            f"↳ {reason}")
+
+    e.description = "\n\n".join(lines)
+    warns_total = len([c for c in user_cases if c.get("action") == "warn"])
+    e.set_footer(text=f"Page {page}/{total_pages}  •  {len(user_cases)} total actions  •  {warns_total} warns")
+    await interaction.response.send_message(embed=e)
+
+# ── /case ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="case", description="Look up a specific moderation case by its case ID")
+@app_commands.describe(case_id="The numeric case ID (shown in mod logs and action messages)")
+async def cmd_case(interaction: discord.Interaction, case_id: int):
+    if not await has_cmd_perm(interaction, "case"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "You need moderation permissions."), ephemeral=True)
+    gid   = str(interaction.guild.id)
+    cases = cases_db.get(gid, [])
+    c     = next((x for x in cases if x.get("case_id") == case_id), None)
+    if not c:
+        return await interaction.response.send_message(
+            embed=_e_error("Not Found", f"Case `#{case_id}` does not exist."), ephemeral=True)
+
+    user_obj = await bot.fetch_user(int(c["user_id"])) if c.get("user_id") else None
+    mod_obj  = await bot.fetch_user(int(c["mod_id"])) if c.get("mod_id") else None
+    colour   = {"ban": C_RED, "kick": C_ORANGE, "warn": C_YELLOW,
+                "timeout": C_ORANGE, "unban": C_GREEN}.get(c.get("action", ""), C_BLUE)
+    e = discord.Embed(title=f"📋  Case #{case_id} — {c.get('action','?').upper()}", colour=colour)
+    if user_obj:
+        e.set_thumbnail(url=user_obj.display_avatar.url)
+    e.add_field(name="👤  User",   value=f"{user_obj or c.get('user_id')}", inline=True)
+    e.add_field(name="🔨  Mod",    value=f"{mod_obj or c.get('mod_id', 'System')}", inline=True)
+    e.add_field(name="📅  Date",   value=f"<t:{int(c.get('timestamp',0))}:F>" if c.get("timestamp") else "?", inline=True)
+    e.add_field(name="📝  Reason", value=c.get("reason") or "No reason provided", inline=False)
+    if c.get("extra"):
+        e.add_field(name="ℹ️  Extra", value=str(c["extra"])[:200], inline=False)
+    e.set_footer(text=f"TSR Moderation  •  Total cases: {len(cases)}")
+    await interaction.response.send_message(embed=e)
+
+# ── /note ─────────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="note", description="Add, list, or remove a private staff note on a user")
+@app_commands.describe(
+    user="The user to attach a note to",
+    action="add / list / remove",
+    text="Note text (required for add)",
+    index="Note number to remove (required for remove, see list first)")
+@app_commands.choices(action=[
+    app_commands.Choice(name="add",    value="add"),
+    app_commands.Choice(name="list",   value="list"),
+    app_commands.Choice(name="remove", value="remove"),
+])
+async def cmd_note(interaction: discord.Interaction,
+                   user: discord.User,
+                   action: str = "list",
+                   text: str = "",
+                   index: int = 0):
+    if not await has_cmd_perm(interaction, "note"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "You need moderation permissions."), ephemeral=True)
+    gid  = str(interaction.guild.id)
+    uid  = str(user.id)
+    notes: list = note_db.setdefault(gid, {}).setdefault(uid, [])
+
+    if action == "add":
+        if not text.strip():
+            return await interaction.response.send_message(
+                embed=_e_error("No Text", "Provide the note text with `text:`."), ephemeral=True)
+        notes.append({
+            "text":      text.strip(),
+            "author_id": str(interaction.user.id),
+            "author":    str(interaction.user),
+            "ts":        int(now_utc().timestamp()),
+        })
+        save_json("note_db.json", note_db)
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                description=f"📝  Note added for {user.mention} (note #{len(notes)}).",
+                color=C_GREEN), ephemeral=True)
+
+    if action == "remove":
+        if index < 1 or index > len(notes):
+            return await interaction.response.send_message(
+                embed=_e_error("Invalid Index", f"Use `/note user:@ action:list` to see note numbers first."), ephemeral=True)
+        removed = notes.pop(index - 1)
+        save_json("note_db.json", note_db)
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                description=f"🗑️  Removed note #{index}: *{removed['text'][:80]}*",
+                color=C_ORANGE), ephemeral=True)
+
+    # List
+    if not notes:
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                title=f"📝  Notes — {user}",
+                description="No notes on this user.",
+                color=C_GREEN), ephemeral=True)
+    e = discord.Embed(title=f"📝  Notes — {user}", colour=C_YELLOW)
+    e.set_thumbnail(url=user.display_avatar.url)
+    lines = []
+    for i, n in enumerate(notes, 1):
+        ts  = f"<t:{n['ts']}:d>" if n.get("ts") else "?"
+        lines.append(f"`{i}.` {n['text'][:120]}\n    — {n['author']} on {ts}")
+    e.description = "\n\n".join(lines)
+    e.set_footer(text=f"{len(notes)} note(s)  •  Staff only — not visible to users")
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+# ── /notes alias ──────────────────────────────────────────────────────────
+
+@bot.tree.command(name="notes", description="View all staff notes on a user (shortcut for /note list)")
+@app_commands.describe(user="The user to check notes for")
+async def cmd_notes(interaction: discord.Interaction, user: discord.User):
+    if not await has_cmd_perm(interaction, "notes"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "You need moderation permissions."), ephemeral=True)
+    gid   = str(interaction.guild.id)
+    notes = note_db.get(gid, {}).get(str(user.id), [])
+    if not notes:
+        return await interaction.response.send_message(
+            embed=discord.Embed(
+                title=f"📝  Notes — {user}",
+                description="No notes on this user.",
+                color=C_GREEN), ephemeral=True)
+    e = discord.Embed(title=f"📝  Notes — {user}", colour=C_YELLOW)
+    e.set_thumbnail(url=user.display_avatar.url)
+    lines = []
+    for i, n in enumerate(notes, 1):
+        ts  = f"<t:{n['ts']}:d>" if n.get("ts") else "?"
+        lines.append(f"`{i}.` {n['text'][:120]}\n    — {n['author']} on {ts}")
+    e.description = "\n\n".join(lines)
+    e.set_footer(text=f"{len(notes)} note(s)")
+    await interaction.response.send_message(embed=e, ephemeral=True)
+
+# ── /massban ──────────────────────────────────────────────────────────────
+
+@bot.tree.command(name="massban", description="Ban multiple users by ID at once — separate IDs with spaces")
+@app_commands.describe(
+    user_ids="Space-separated list of user IDs to ban",
+    reason="Reason to attach to all bans")
+@app_commands.default_permissions(ban_members=True)
+async def cmd_massban(interaction: discord.Interaction,
+                      user_ids: str,
+                      reason: str = "Mass ban"):
+    if not await has_cmd_perm(interaction, "massban"):
+        return await interaction.response.send_message(
+            embed=_e_error("No Permission", "You need **Ban Members** permission."), ephemeral=True)
+
+    await interaction.response.defer()
+    ids     = [x.strip() for x in user_ids.replace(",", " ").split() if x.strip().isdigit()]
+    if not ids:
+        return await interaction.followup.send(
+            embed=_e_error("No Valid IDs", "Provide space-separated numeric user IDs."))
+
+    gid      = str(interaction.guild.id)
+    banned   = []
+    failed   = []
+    audit    = f"Massban by {interaction.user} — {reason}"
+    for uid in ids[:100]:   # cap at 100 per invocation
+        try:
+            await interaction.guild.ban(discord.Object(int(uid)),
+                                        reason=audit,
+                                        delete_message_days=0)
+            banned.append(uid)
+            # Log case
+            _add_case(gid, {
+                "action":    "ban",
+                "user_id":   uid,
+                "mod_id":    str(interaction.user.id),
+                "reason":    reason,
+                "timestamp": int(now_utc().timestamp()),
+                "extra":     "massban",
+            })
+        except Exception:
+            failed.append(uid)
+
+    lines = [f"✅  Banned **{len(banned)}** user(s)."]
+    if failed:
+        lines.append(f"❌  Failed on {len(failed)} ID(s): `{'`, `'.join(failed[:10])}`")
+    e = discord.Embed(
+        title="🔨  Mass Ban Complete",
+        description="\n".join(lines),
+        colour=C_RED if failed else C_GREEN)
+    e.add_field(name="Reason", value=reason, inline=False)
+    e.set_footer(text=f"Executed by {interaction.user}")
+    await interaction.followup.send(embed=e)
+    await send_log(interaction.guild, _log_embed(
+        "🔨  Mass Ban", C_RED, icon="🔨",
+        fields=[
+            ("👤  Executor",  interaction.user.mention,    True),
+            ("✅  Banned",    str(len(banned)),            True),
+            ("❌  Failed",    str(len(failed)),            True),
+            ("📝  Reason",   reason,                      False),
+            ("🆔  IDs",      " ".join(banned[:20]) or "-", False),
+        ]
+    ))
+
+# ── Helper: log a case to cases_db ───────────────────────────────────────
+
+def _add_case(gid: str, data: dict) -> int:
+    cases = cases_db.setdefault(gid, [])
+    case_id = len(cases) + 1
+    data["case_id"] = case_id
+    cases.append(data)
+    save_json("cases_db.json", cases_db)
+    return case_id
+
+# ── Patch existing /warn to auto-escalate and log cases ───────────────────
+# (Intercept applied via on_warn_issued helper called from the warn command)
+
+async def _apply_warn_escalation(interaction: discord.Interaction, member: discord.Member, total_warns: int):
+    """Check warn thresholds and apply the configured escalation action."""
+    cfg   = gcfg(interaction.guild.id)
+    thr   = cfg.get("warn_thresholds", {})
+    key   = str(total_warns)
+    if key not in thr:
+        return
+    action = thr[key]
+    reason = f"Auto-escalation: {total_warns} warns reached"
+    e_desc = None
+
+    try:
+        if action == "kick":
+            await member.kick(reason=reason)
+            e_desc = f"Kicked after reaching {total_warns} warnings."
+        elif action == "ban":
+            await member.ban(reason=reason, delete_message_days=0)
+            e_desc = f"Banned after reaching {total_warns} warnings."
+        elif action == "timeout_1h":
+            await member.timeout(datetime.timedelta(hours=1), reason=reason)
+            e_desc = f"Timed out 1 hour after reaching {total_warns} warnings."
+        elif action == "timeout_12h":
+            await member.timeout(datetime.timedelta(hours=12), reason=reason)
+            e_desc = f"Timed out 12 hours after reaching {total_warns} warnings."
+        elif action == "timeout_24h":
+            await member.timeout(datetime.timedelta(hours=24), reason=reason)
+            e_desc = f"Timed out 24 hours after reaching {total_warns} warnings."
+    except Exception:
+        return
+
+    if e_desc:
+        try:
+            await member.send(embed=discord.Embed(
+                title=f"⚠️  Auto-Escalation — {interaction.guild.name}",
+                description=e_desc,
+                color=C_ORANGE))
+        except Exception: pass
+        await send_log(interaction.guild, _log_embed(
+            "⚠️  Warn Threshold Reached", C_ORANGE, icon="⚠️",
+            thumbnail=member.display_avatar.url,
+            fields=[
+                ("👤  User",      f"{member.mention} `{member.id}`", True),
+                ("⚠️  Warns",     str(total_warns),                 True),
+                ("⚡  Action",    action,                           True),
+            ]
+        ))
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  GLOBAL ERROR HANDLER  — nothing silently fails
